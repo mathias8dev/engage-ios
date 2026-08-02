@@ -1,0 +1,41 @@
+{
+  "pins" : [
+    {
+      "identity" : "divkit-ios",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/divkit/divkit-ios.git",
+      "state" : {
+        "revision" : "ad99161e2f60c1160014ff82da0e6b479aba8d9c",
+        "version" : "32.60.0"
+      }
+    },
+    {
+      "identity" : "swift-cmark",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-cmark.git",
+      "state" : {
+        "revision" : "924936d0427cb25a61169739a7660230bffa6ea6",
+        "version" : "0.8.0"
+      }
+    },
+    {
+      "identity" : "swift-markdown",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-markdown.git",
+      "state" : {
+        "revision" : "ea79e83c8744d2b50b0dc2d5bbd1e857e1253bf9",
+        "version" : "0.6.0"
+      }
+    },
+    {
+      "identity" : "vgsl",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/yandex/vgsl.git",
+      "state" : {
+        "revision" : "4a730649d8348aea9beaae5d51417231570a53eb",
+        "version" : "7.25.1"
+      }
+    }
+  ],
+  "version" : 2
+}
