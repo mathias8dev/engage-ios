@@ -1,0 +1,23 @@
+name: Release Swift package
+
+on:
+  push:
+    tags: ['*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate tag and SDK versions
+        run: ./scripts/validate-version.sh "$GITHUB_REF_NAME"
+      - name: Build and test every product
+        run: ./scripts/check.sh
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

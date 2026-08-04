@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "EngageSDK", targets: ["EngageSDK"]),
         .library(name: "EngageCore", targets: ["EngageCore"]),
         .library(name: "EngagePush", targets: ["EngagePush"]),
+        .library(name: "EngagePushServiceExtension", targets: ["EngagePushServiceExtension"]),
         .library(name: "EngageInApp", targets: ["EngageInApp"]),
         .library(name: "EngageMessageCenter", targets: ["EngageMessageCenter"]),
         .library(name: "EngageMessageCenterDivKit", targets: ["EngageMessageCenterDivKit"]),
@@ -36,6 +37,8 @@ let package = Package(
             ]
         ),
         .target(name: "EngagePush", dependencies: ["EngageCore"]),
+        // Kept extension-safe: this product does not link EngageCore or any UIApplication code.
+        .target(name: "EngagePushServiceExtension"),
         .target(
             name: "EngageInApp",
             dependencies: [

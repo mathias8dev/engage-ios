@@ -2,7 +2,7 @@
 import Foundation
 import UserNotifications
 
-/// Base class for an app Notification Service Extension that wants Engage rich-media support.
+/// Base class for an App Notification Service Extension that wants Engage rich-media support.
 /// It only materializes the APNs `engage.image_url` attachment and never requests permission.
 open class EngageNotificationServiceExtension: UNNotificationServiceExtension {
     private let lock = NSLock()

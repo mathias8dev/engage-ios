@@ -249,7 +249,7 @@ actor CoreRuntime {
             BootstrapRequest(
                 locale: Locale.current.identifier.replacingOccurrences(of: "_", with: "-"),
                 timezone: TimeZone.current.identifier,
-                sdkVersion: "0.1.0",
+                sdkVersion: EngageSDKInfo.version,
                 appVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
                 appBuild: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
                 deviceModel: Self.deviceModel(),

@@ -1,0 +1,8 @@
+[tasks.check]
+description = "Build and test every iOS SDK product"
+run = "./scripts/check.sh"
+
+[tasks.release]
+description = "Release the version declared by EngageSDKInfo.version"
+confirm = "Create and push this iOS SDK release tag?"
+run = "./scripts/release.sh"
