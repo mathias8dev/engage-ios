@@ -1,4 +1,5 @@
 import Foundation
+import EngageCore
 
 struct ImpressionHistory: Codable, Sendable {
     var total = 0
@@ -30,6 +31,7 @@ final class InAppHistory: @unchecked Sendable {
         stored = (try? Data(contentsOf: url)).flatMap {
             try? JSONDecoder().decode(PersistedInAppHistory.self, from: $0)
         } ?? PersistedInAppHistory()
+        EngageLogger.info("InApp.History", "loaded generations=\(stored.generations.count)")
     }
 
     var sessionId: Int64 { locked { active.sessionId } }
@@ -38,11 +40,18 @@ final class InAppHistory: @unchecked Sendable {
     @discardableResult
     func beginSession() -> Int64 {
         mutate { value in value.sessionId += 1; value.sessionCount += 1 }
-        return sessionId
+        let id = sessionId
+        EngageLogger.info("InApp.History", "session started generation=\(generation()) sessionId=\(id) count=\(sessionCount)")
+        return id
     }
 
     func history(_ campaignKey: String) -> ImpressionHistory {
-        locked { active.records[campaignKey] ?? ImpressionHistory() }
+        let value = locked { active.records[campaignKey] ?? ImpressionHistory() }
+        EngageLogger.verbose(
+            "InApp.History",
+            "history read campaign=\(campaignKey) total=\(value.total) sessionCount=\(value.sessionCount) dayCount=\(value.dayCount)"
+        )
+        return value
     }
 
     func recordImpression(_ campaignKey: String, at timestamp: Date) {
@@ -57,6 +66,12 @@ final class InAppHistory: @unchecked Sendable {
             record.lastImpressionAt = timestamp
             value.records[campaignKey] = record
         }
+        let value = history(campaignKey)
+        EngageLogger.info(
+            "InApp.History",
+            "impression recorded campaign=\(campaignKey) total=\(value.total) sessionCount=\(value.sessionCount) " +
+                "dayCount=\(value.dayCount)"
+        )
     }
 
     func recordDismiss(_ campaignKey: String, at timestamp: Date) {
@@ -65,13 +80,16 @@ final class InAppHistory: @unchecked Sendable {
             record.lastDismissedAt = timestamp
             value.records[campaignKey] = record
         }
+        EngageLogger.info("InApp.History", "dismiss recorded campaign=\(campaignKey)")
     }
 
     func clearAll() {
+        EngageLogger.warning("InApp.History", "all history clearing generations=\(stored.generations.count)")
         lock.lock()
         stored = PersistedInAppHistory()
         try? FileManager.default.removeItem(at: url)
         lock.unlock()
+        EngageLogger.warning("InApp.History", "all history cleared")
     }
 
     private var active: GenerationHistory {
@@ -86,6 +104,7 @@ final class InAppHistory: @unchecked Sendable {
         stored.generations[key] = value
         if let data = try? JSONEncoder().encode(stored) {
             try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            EngageLogger.verbose("InApp.History", "history persisted generation=\(key) bytes=\(data.count)")
         }
         lock.unlock()
     }

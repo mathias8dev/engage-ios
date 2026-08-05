@@ -66,6 +66,20 @@ public enum JSONValue: Codable, Hashable, Sendable {
     }
 }
 
+extension JSONValue {
+    var engageTypeName: String {
+        switch self {
+        case .null: return "null"
+        case .bool: return "boolean"
+        case .integer: return "integer"
+        case .number: return "number"
+        case .string: return "string"
+        case .array: return "array"
+        case .object: return "object"
+        }
+    }
+}
+
 public typealias EngagePayload = [String: JSONValue]
 
 public extension Dictionary where Key == String, Value == JSONValue {

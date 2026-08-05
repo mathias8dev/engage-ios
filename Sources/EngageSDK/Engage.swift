@@ -12,8 +12,10 @@ public enum Engage {
     public static var state: EngageState<Bool> { EngageCore.state }
 
     public static func start(config: EngageConfig) {
+        EngageLogger.info("SDK", "facade start requested")
         EngageCore.start(config: config)
         modules.activate()
+        EngageLogger.info("SDK", "facade modules activated")
     }
 
     public static var installation: Installation { EngageCore.installation }
@@ -43,13 +45,18 @@ private final class EngageSDKModules: @unchecked Sendable {
 
     func activate() {
         lock.lock(); defer { lock.unlock() }
-        guard !activated else { return }
+        guard !activated else {
+            EngageLogger.verbose("SDK", "module activation ignored reason=already_activated")
+            return
+        }
+        EngageLogger.debug("SDK", "module activation started")
         storedInApp = InAppModule.activate()
         storedMessageCenter = MessageCenterModule.activate()
         #if canImport(UIKit)
         storedPush = PushModule.activate()
         #endif
         activated = true
+        EngageLogger.info("SDK", "module activation completed")
     }
 
     var inApp: InApp {

@@ -50,24 +50,32 @@ final class InboxStore: @unchecked Sendable {
             try? JSONDecoder().decode(StoredInbox.self, from: $0)
         } ?? StoredInbox()
         purgeExpiredLocked(now: Date())
+        EngageLogger.info(
+            "MessageCenter.Store",
+            "loaded generation=\(stored.generation) entries=\(stored.entries.count) unread=\(stored.unreadCount) " +
+                "mutations=\(stored.mutations.count) renderings=\(stored.renderings.count)"
+        )
     }
 
     var generation: Int64 { locked { stored.generation } }
     var unreadCount: Int { locked { stored.unreadCount } }
 
     func entries(ids: [String]? = nil, now: Date = Date()) -> [InboxEntry] {
-        return locked {
+        let values: [InboxEntry] = locked {
             let values = ids.map { $0.compactMap { stored.entries[$0] } }
                 ?? Array(stored.entries.values).sorted {
                     ($0.sentAt, $0.id.value) > ($1.sentAt, $1.id.value)
                 }
             return values.filter { $0.expiresAt.map { $0 > now } ?? true }
         }
+        EngageLogger.verbose("MessageCenter.Store", "entries read requested=\(ids?.count ?? -1) returned=\(values.count)")
+        return values
     }
 
     @discardableResult
     func activate(_ generation: Int64) -> Bool {
-        mutate {
+        EngageLogger.debug("MessageCenter.Store", "generation activating generation=\(generation)")
+        return mutate {
             if stored.generation != generation {
                 stored = StoredInbox(generation: generation)
             } else {
@@ -86,7 +94,12 @@ final class InboxStore: @unchecked Sendable {
         hasMore: Bool,
         unreadCount: Int
     ) -> Bool {
-        mutate {
+        EngageLogger.debug(
+            "MessageCenter.Store",
+            "page saving generation=\(generation) pageSize=\(pageSize) hasCursor=\(cursor != nil) " +
+                "entries=\(entries.count) hasMore=\(hasMore) unread=\(unreadCount)"
+        )
+        return mutate {
             guard stored.generation == generation else { return }
             entries.forEach { remote in
                 if stored.mutations.contains(where: {
@@ -122,7 +135,7 @@ final class InboxStore: @unchecked Sendable {
 
     func cachedWindow(pageSize: Int) -> CachedInboxWindow {
         mutate { purgeExpiredLocked(now: Date()) }
-        return locked {
+        let cached = locked {
             let window = stored.windows[String(pageSize)]
             return CachedInboxWindow(
                 entryIds: window?.entryIds.filter { stored.entries[$0] != nil } ?? [],
@@ -130,11 +143,21 @@ final class InboxStore: @unchecked Sendable {
                 hasMore: window?.hasMore ?? false
             )
         }
+        EngageLogger.debug(
+            "MessageCenter.Store",
+            "cached window read pageSize=\(pageSize) entries=\(cached.entryIds.count) hasMore=\(cached.hasMore)"
+        )
+        return cached
     }
 
     @discardableResult
     func enqueue(_ mutation: InboxMutation) -> Bool {
-        mutate {
+        EngageLogger.debug(
+            "MessageCenter.Store",
+            "mutation persisting operationId=\(mutation.operationId) generation=\(mutation.generation) " +
+                "type=\(mutation.type) entryId=\(mutation.entryId ?? "none")"
+        )
+        return mutate {
             guard stored.generation == mutation.generation,
                   !stored.mutations.contains(where: { $0.operationId == mutation.operationId }) else { return }
             stored.mutations.append(mutation)
@@ -143,20 +166,23 @@ final class InboxStore: @unchecked Sendable {
     }
 
     func pending(generation: Int64) -> [InboxMutation] {
-        locked { stored.mutations.filter { $0.generation == generation }.prefix(100).map { $0 } }
+        let values = locked { stored.mutations.filter { $0.generation == generation }.prefix(100).map { $0 } }
+        EngageLogger.verbose("MessageCenter.Store", "pending mutations read generation=\(generation) count=\(values.count)")
+        return values
     }
 
     @discardableResult
     func settle(ids: Set<String>) -> Bool {
-        mutate { stored.mutations.removeAll { ids.contains($0.operationId) } }
+        EngageLogger.debug("MessageCenter.Store", "mutations settling count=\(ids.count)")
+        return mutate { stored.mutations.removeAll { ids.contains($0.operationId) } }
     }
 
     func contains(_ id: String) -> Bool { locked { stored.entries[id] != nil } }
     func entry(_ id: String) -> InboxEntry? { locked { stored.entries[id] } }
 
     func cachedRenderings(_ ids: [InboxEntryId]) -> [InboxRenderingSnapshot] {
-        locked {
-            ids.compactMap { id in
+        let values: [InboxRenderingSnapshot] = locked {
+            ids.compactMap { id -> InboxRenderingSnapshot? in
                 guard let value = stored.renderings[id.value] else { return nil }
                 return InboxRenderingSnapshot(
                     entryId: id,
@@ -166,11 +192,14 @@ final class InboxStore: @unchecked Sendable {
                 )
             }
         }
+        EngageLogger.debug("MessageCenter.Store", "rendering cache read requested=\(ids.count) hits=\(values.count)")
+        return values
     }
 
     @discardableResult
     func saveRenderings(_ values: [InboxRenderingSnapshot]) -> Bool {
-        mutate {
+        EngageLogger.debug("MessageCenter.Store", "renderings saving count=\(values.count)")
+        return mutate {
             for value in values {
                 guard stored.entries[value.entryId.value] != nil else { continue }
                 let current = stored.renderings[value.entryId.value]
@@ -186,10 +215,17 @@ final class InboxStore: @unchecked Sendable {
     }
 
     func wipe() throws {
+        EngageLogger.warning("MessageCenter.Store", "wipe started")
         guard mutate({ stored = StoredInbox() }) else { throw InboxStoreError.persistenceFailed }
+        EngageLogger.warning("MessageCenter.Store", "wipe completed")
     }
 
     private func applyOptimistic(_ mutation: InboxMutation) {
+        EngageLogger.verbose(
+            "MessageCenter.Store",
+            "optimistic mutation applying operationId=\(mutation.operationId) type=\(mutation.type) " +
+                "entryId=\(mutation.entryId ?? "none")"
+        )
         if mutation.type == "MARK_ALL_READ" {
             stored.entries = stored.entries.mapValues { replace($0, readAt: Date()) }
             stored.unreadCount = 0
@@ -250,6 +286,7 @@ final class InboxStore: @unchecked Sendable {
             entry.expiresAt.map { $0 <= now ? entry.id.value : nil } ?? nil
         })
         guard !expired.isEmpty else { return }
+        EngageLogger.info("MessageCenter.Store", "expired entries purging count=\(expired.count)")
         for id in expired {
             if stored.entries[id]?.readAt == nil { stored.unreadCount = max(0, stored.unreadCount - 1) }
             stored.entries[id] = nil
@@ -283,11 +320,17 @@ final class InboxStore: @unchecked Sendable {
         } catch {
             stored = previous
             lock.unlock()
+            EngageLogger.error("MessageCenter.Store", "mutation persistence failed", error: error)
             return false
         }
         let next = revision.value + 1
         lock.unlock()
         revision.set(next)
+        EngageLogger.verbose(
+            "MessageCenter.Store",
+            "mutation persisted revision=\(next) generation=\(stored.generation) entries=\(stored.entries.count) " +
+                "unread=\(stored.unreadCount) pending=\(stored.mutations.count)"
+        )
         return true
     }
 
@@ -298,10 +341,12 @@ final class InboxStore: @unchecked Sendable {
     }
 
     private func persist() throws {
-        try JSONEncoder().encode(stored).write(
+        let data = try JSONEncoder().encode(stored)
+        try data.write(
             to: url,
             options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
         )
+        EngageLogger.verbose("MessageCenter.Store", "file persisted bytes=\(data.count)")
     }
 }
 

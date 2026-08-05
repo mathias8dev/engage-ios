@@ -107,9 +107,11 @@ final class InAppEvaluator {
         self.appVersion = appVersion
         self.locales = locales
         self.now = now
+        EngageLogger.debug("InApp.Evaluator", "initialized appVersion=\(appVersion)")
     }
 
     func replaceCampaigns(_ values: [InAppCampaign]) {
+        EngageLogger.debug("InApp.Evaluator", "campaigns replacing previous=\(campaigns.count) next=\(values.count)")
         campaigns = values
         let keys = Set(values.map(\.key))
         eligibleAt = eligibleAt.filter { keys.contains($0.key) }
@@ -125,9 +127,11 @@ final class InAppEvaluator {
                 markEligible(campaign, trigger: trigger, at: timestamp, onlyIfAbsent: true)
             }
         }
+        EngageLogger.info("InApp.Evaluator", "campaigns active count=\(campaigns.count) eligible=\(eligibleAt.count)")
     }
 
     func resetContext() {
+        EngageLogger.info("InApp.Evaluator", "context resetting campaigns=\(campaigns.count) eligible=\(eligibleAt.count)")
         campaigns = []
         eligibleAt = [:]
         currentScreen = nil
@@ -136,8 +140,10 @@ final class InAppEvaluator {
 
     func onSignal(_ signal: InAppRuntimeSignal) {
         let timestamp = now()
+        let type: String
         switch signal {
         case .appOpened:
+            type = "appOpened"
             guard !isForeground else { return }
             isForeground = true
             history.beginSession()
@@ -150,8 +156,10 @@ final class InAppEvaluator {
                 }
             }
         case .appBackgrounded:
+            type = "appBackgrounded"
             isForeground = false
         case let .screenViewed(key):
+            type = "screen:\(key)"
             currentScreen = key
             for campaign in campaigns {
                 for trigger in campaign.triggers where trigger.type == .screenView && trigger.screenName == key {
@@ -159,24 +167,31 @@ final class InAppEvaluator {
                 }
             }
         case .screenCleared:
+            type = "screenCleared"
             currentScreen = nil
             for campaign in campaigns where campaign.triggers.contains(where: { $0.type == .screenView }) {
                 eligibleAt[campaign.key] = nil
             }
         case let .event(name):
+            type = "event:\(name)"
             for campaign in campaigns {
                 for trigger in campaign.triggers where trigger.type == .event && trigger.eventName == name {
                     markEligible(campaign, trigger: trigger, at: timestamp)
                 }
             }
         case .localDataWiped:
+            type = "localDataWiped"
             resetContext()
         }
+        EngageLogger.debug(
+            "InApp.Evaluator",
+            "signal applied type=\(type) foreground=\(isForeground) eligible=\(eligibleAt.count)"
+        )
     }
 
     func candidates() -> [ResolvedInAppContent] {
         let timestamp = now()
-        return campaigns.compactMap { campaign in
+        let values: [ResolvedInAppContent] = campaigns.compactMap { campaign -> ResolvedInAppContent? in
             guard let eligible = eligibleAt[campaign.key],
                   eligible <= timestamp,
                   isScheduled(campaign, at: timestamp),
@@ -195,6 +210,11 @@ final class InAppEvaluator {
             }
             return $0.campaign.key < $1.campaign.key
         }
+        EngageLogger.debug(
+            "InApp.Evaluator",
+            "candidates resolved count=\(values.count) messages=\(values.map { $0.campaign.messageId })"
+        )
+        return values
     }
 
     func nextEvaluationDelayNanoseconds() -> UInt64? {
@@ -207,19 +227,29 @@ final class InAppEvaluator {
                 boundaries.append(last.addingTimeInterval(Double(minutes) * 60))
             }
         }
-        guard let next = boundaries.filter({ $0 > timestamp }).min() else { return nil }
-        return UInt64(max(0.001, next.timeIntervalSince(timestamp) + 0.001) * 1_000_000_000)
+        guard let next = boundaries.filter({ $0 > timestamp }).min() else {
+            EngageLogger.verbose("InApp.Evaluator", "next evaluation boundary absent")
+            return nil
+        }
+        let delay = UInt64(max(0.001, next.timeIntervalSince(timestamp) + 0.001) * 1_000_000_000)
+        EngageLogger.verbose("InApp.Evaluator", "next evaluation boundary delayNanoseconds=\(delay)")
+        return delay
     }
 
-    func consume(_ candidate: ResolvedInAppContent) { eligibleAt[candidate.campaign.key] = nil }
+    func consume(_ candidate: ResolvedInAppContent) {
+        eligibleAt[candidate.campaign.key] = nil
+        EngageLogger.debug("InApp.Evaluator", "candidate consumed messageId=\(candidate.campaign.messageId)")
+    }
 
     func recordImpression(_ candidate: ResolvedInAppContent) {
+        EngageLogger.info("InApp.Evaluator", "impression recording messageId=\(candidate.campaign.messageId)")
         history.recordImpression(candidate.campaign.key, at: now())
         if case .overlay = candidate.variant.presentation { consume(candidate) }
         if candidate.campaign.oneShot { consume(candidate) }
     }
 
     func recordDismiss(_ candidate: ResolvedInAppContent) {
+        EngageLogger.info("InApp.Evaluator", "dismiss recording messageId=\(candidate.campaign.messageId)")
         history.recordDismiss(candidate.campaign.key, at: now())
         if !candidate.campaign.displayPolicy.redisplayAfterDismissal { consume(candidate) }
     }
@@ -250,6 +280,10 @@ final class InAppEvaluator {
     ) {
         if onlyIfAbsent, eligibleAt[campaign.key] != nil { return }
         eligibleAt[campaign.key] = timestamp.addingTimeInterval(Double(max(0, trigger.delaySeconds)))
+        EngageLogger.verbose(
+            "InApp.Evaluator",
+            "campaign eligible messageId=\(campaign.messageId) trigger=\(trigger.type) delaySeconds=\(trigger.delaySeconds)"
+        )
     }
 
     private func isScheduled(_ campaign: InAppCampaign, at timestamp: Date) -> Bool {
@@ -278,14 +312,27 @@ final class InAppEvaluator {
     }
 
     private func selectVariant(_ campaign: InAppCampaign) -> InAppContentVariant? {
-        guard let selectedLocale = selectLocale(campaign) else { return nil }
+        guard let selectedLocale = selectLocale(campaign) else {
+            EngageLogger.debug("InApp.Evaluator", "variant unavailable messageId=\(campaign.messageId) reason=locale")
+            return nil
+        }
         let variants = campaign.variants.filter { normalizeLocale($0.locale) == selectedLocale }
-        guard !variants.isEmpty else { return nil }
+        guard !variants.isEmpty else {
+            EngageLogger.debug("InApp.Evaluator", "variant unavailable messageId=\(campaign.messageId) reason=no_variants")
+            return nil
+        }
         let bucket = stableBucket("\(installationSeed()):\(campaign.experienceId)")
         var upperBound = 0
         for variant in variants {
             upperBound += variant.allocationPercentage
-            if bucket < upperBound { return variant }
+            if bucket < upperBound {
+                EngageLogger.debug(
+                    "InApp.Evaluator",
+                    "variant selected messageId=\(campaign.messageId) variant=\(variant.id ?? variant.key ?? "none") " +
+                        "locale=\(selectedLocale) bucket=\(bucket)"
+                )
+                return variant
+            }
         }
         return nil
     }

@@ -5,10 +5,22 @@ import EngageCore
 enum InAppDocumentParser {
     static func parse(_ document: RemoteDocument) -> InAppCampaign? {
         do {
-            return document.payload.string("source") == "AUTOMATION"
+            let campaign = document.payload.string("source") == "AUTOMATION"
                 ? try parseAutomation(document)
                 : try parseExperience(document)
+            EngageLogger.debug(
+                "InApp.Parser",
+                "document parsed key=\(document.key) revision=\(document.revision) " +
+                    "experienceId=\(campaign.experienceId) messageId=\(campaign.messageId) " +
+                    "variants=\(campaign.variants.count) triggers=\(campaign.triggers.count)"
+            )
+            return campaign
         } catch {
+            EngageLogger.error(
+                "InApp.Parser",
+                "document rejected key=\(document.key) revision=\(document.revision)",
+                error: error
+            )
             return nil
         }
     }

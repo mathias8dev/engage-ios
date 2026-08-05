@@ -139,6 +139,7 @@ actor CorePersistence {
     private var privacyControl: PrivacyControl?
 
     init(directory: URL) {
+        EngageLogger.debug("Core.Storage", "persistence loading directory=\(directory.lastPathComponent)")
         stateURL = directory.appendingPathComponent("core-state.json")
         legacyRevocationURL = directory.appendingPathComponent("privacy-revocation.json")
         secureStore = SecureBlobStore(directory: directory)
@@ -232,15 +233,29 @@ actor CorePersistence {
             disabledFeatures: loadedState.disabledFeatures,
             installationEnabled: !loadedState.wiped && loadedControl?.suspendedAfterWipe != true
         )
+        EngageLogger.info(
+            "Core.Storage",
+            "persistence loaded installationId=\(materialized?.installationId ?? "none") " +
+                "generation=\(materialized?.generation ?? 0) privacy=\(initialState.privacy) " +
+                "outbox=\(loadedState.outbox.count) documents=\(loadedState.sync.documents.count) " +
+                "pendingRevocations=\(loadedControl?.revocations.count ?? 0)"
+        )
 
         // Rewrites legacy state without credentials after a successful migration.
         if mayRewriteFunctionalState { try? Self.persist(loadedState, to: stateURL) }
         if migratedLegacyRevocation { try? FileManager.default.removeItem(at: legacyRevocationURL) }
     }
 
-    func recoveryToken() -> String? { sessionSecrets?.recoveryToken }
+    func recoveryToken() -> String? {
+        EngageLogger.verbose("Core.Storage", "recovery token read present=\(sessionSecrets?.recoveryToken != nil)")
+        return sessionSecrets?.recoveryToken
+    }
 
     func saveSession(_ session: InstallationSession) throws {
+        EngageLogger.debug(
+            "Core.Storage",
+            "session persist started installationId=\(session.installationId) generation=\(session.generation)"
+        )
         let secrets = SessionSecrets(session)
         let previousSecrets = sessionSecrets
         try secureStore.write(secrets, account: .session)
@@ -251,6 +266,10 @@ actor CorePersistence {
                 state.wiped = false
             }
             sessionSecrets = secrets
+            EngageLogger.info(
+                "Core.Storage",
+                "session persisted installationId=\(session.installationId) generation=\(session.generation)"
+            )
         } catch {
             if let previousSecrets {
                 try? secureStore.write(previousSecrets, account: .session)
@@ -262,6 +281,7 @@ actor CorePersistence {
     }
 
     func setPrivacy(_ value: PrivacyState) throws {
+        EngageLogger.debug("Core.Storage", "privacy persisting state=\(value)")
         try mutateState {
             state.privacy = value
             if let session = state.session {
@@ -271,7 +291,11 @@ actor CorePersistence {
     }
 
     func resumeAfterWipe() throws {
-        guard state.wiped || privacyControl?.suspendedAfterWipe == true else { return }
+        guard state.wiped || privacyControl?.suspendedAfterWipe == true else {
+            EngageLogger.verbose("Core.Storage", "resume after wipe ignored reason=not_wiped")
+            return
+        }
+        EngageLogger.warning("Core.Storage", "resuming after wipe")
         try mutateState { state.wiped = false }
         try updatePrivacyControl(suspendedAfterWipe: false)
     }
@@ -291,6 +315,11 @@ actor CorePersistence {
         operation: SdkOperation,
         resumesAfterWipe: Bool
     ) throws {
+        EngageLogger.debug(
+            "Core.Storage",
+            "privacy operation persisting operationId=\(operation.operationId) state=\(privacy) " +
+                "resumesAfterWipe=\(resumesAfterWipe)"
+        )
         try mutateState {
             state.privacy = privacy
             if let session = state.session {
@@ -302,28 +331,50 @@ actor CorePersistence {
             }
         }
         if resumesAfterWipe { try updatePrivacyControl(suspendedAfterWipe: false) }
+        EngageLogger.info("Core.Storage", "privacy operation persisted operationId=\(operation.operationId)")
     }
 
     func enqueue(_ operation: SdkOperation) throws {
-        guard !state.outbox.contains(where: { $0.operationId == operation.operationId }) else { return }
+        guard !state.outbox.contains(where: { $0.operationId == operation.operationId }) else {
+            EngageLogger.verbose("Core.Storage", "outbox duplicate ignored operationId=\(operation.operationId)")
+            return
+        }
+        EngageLogger.debug(
+            "Core.Storage",
+            "outbox persisting operationId=\(operation.operationId) type=\(operation.type) generation=\(operation.generation)"
+        )
         try mutateState { state.outbox.append(operation) }
+        EngageLogger.debug("Core.Storage", "outbox persisted operationId=\(operation.operationId) size=\(state.outbox.count)")
     }
 
     func operations(allowedTypes: Set<String>? = nil, limit: Int = 100) -> [SdkOperation] {
-        state.outbox
+        let operations = state.outbox
             .filter { allowedTypes == nil || allowedTypes!.contains($0.type) }
             .prefix(limit)
             .map { $0 }
+        EngageLogger.verbose(
+            "Core.Storage",
+            "outbox read count=\(operations.count) allowedTypes=\(allowedTypes?.sorted() ?? []) limit=\(limit)"
+        )
+        return operations
     }
 
     func settle(_ results: [OperationResult]) throws {
+        EngageLogger.debug("Core.Storage", "outbox settling results=\(results.count)")
         let completed = Set(results.map(\.operationId))
         try mutateState { state.outbox.removeAll { completed.contains($0.operationId) } }
+        EngageLogger.info("Core.Storage", "outbox settled completed=\(completed.count) remaining=\(state.outbox.count)")
     }
 
     func snapshot() -> SyncSnapshot { state.sync }
 
     func applySync(_ response: SyncResponse, modules: Set<SyncModule>) throws {
+        EngageLogger.debug(
+            "Core.Storage",
+            "sync applying generation=\(response.generation) revision=\(response.revision) " +
+                "modules=\(modules) documents=\(response.documents.count) tombstones=\(response.tombstones.count) " +
+                "fullSnapshot=\(response.fullSnapshot)"
+        )
         var documents = response.fullSnapshot
             ? state.sync.documents.filter { !modules.contains($0.module) }
             : state.sync.documents
@@ -342,18 +393,31 @@ actor CorePersistence {
                 refreshAfterSeconds: max(30, response.refreshAfterSeconds)
             )
         }
+        EngageLogger.info(
+            "Core.Storage",
+            "sync applied generation=\(response.generation) revision=\(response.revision) documents=\(documents.count)"
+        )
     }
 
-    func clearSync() throws { try mutateState { state.sync = .empty } }
+    func clearSync() throws {
+        EngageLogger.warning("Core.Storage", "sync state clearing")
+        try mutateState { state.sync = .empty }
+    }
     func containsExposure(_ id: String) -> Bool { state.exposedOperationIds.contains(id) }
     func markExposure(_ id: String) throws {
         try mutateState { state.exposedOperationIds.insert(id) }
+        EngageLogger.debug("Core.Storage", "exposure persisted operationId=\(id)")
     }
     func setDisabledFeatures(_ values: Set<SdkFeature>) throws {
+        EngageLogger.debug("Core.Storage", "disabled features persisting values=\(values)")
         try mutateState { state.disabledFeatures = values }
     }
 
     func wipeFunctionalState() throws {
+        EngageLogger.warning(
+            "Core.Storage",
+            "functional wipe started outbox=\(state.outbox.count) documents=\(state.sync.documents.count)"
+        )
         if privacyControl?.suspendedAfterWipe != true {
             try beginWipe(revocation: nil)
         }
@@ -370,6 +434,7 @@ actor CorePersistence {
                 state.wiped = true
             }
             sessionSecrets = nil
+            EngageLogger.warning("Core.Storage", "functional wipe completed")
         } catch {
             state = previous
             sessionSecrets = previousSecrets
@@ -380,6 +445,10 @@ actor CorePersistence {
 
     /// Establishes the non-functional privacy boundary before any destructive wipe begins.
     func beginWipe(revocation: RevocationEnvelope?) throws {
+        EngageLogger.warning(
+            "Core.Storage",
+            "privacy wipe boundary persisting hasRevocation=\(revocation != nil)"
+        )
         var pending = privacyControl?.revocations ?? []
         if let revocation, !pending.contains(where: {
             $0.operationId == revocation.operationId || $0.credential == revocation.credential
@@ -389,15 +458,23 @@ actor CorePersistence {
         let value = PrivacyControl(suspendedAfterWipe: true, revocations: pending)
         try secureStore.write(value, account: .privacyControl)
         privacyControl = value
+        EngageLogger.warning("Core.Storage", "privacy wipe boundary persisted pendingRevocations=\(pending.count)")
     }
 
     func pendingRevocation() -> RevocationEnvelope? { privacyControl?.revocations.first }
 
     func clearRevocation(operationId: String) throws {
-        guard var value = privacyControl else { return }
+        guard var value = privacyControl else {
+            EngageLogger.verbose("Core.Storage", "revocation clear ignored operationId=\(operationId) reason=no_control")
+            return
+        }
         value.revocations.removeAll { $0.operationId == operationId }
         try secureStore.write(value, account: .privacyControl)
         privacyControl = value
+        EngageLogger.info(
+            "Core.Storage",
+            "revocation cleared operationId=\(operationId) remaining=\(value.revocations.count)"
+        )
     }
 
     private func updatePrivacyControl(suspendedAfterWipe: Bool) throws {
@@ -423,6 +500,7 @@ actor CorePersistence {
     private static func persist<T: Encodable>(_ value: T, to url: URL) throws {
         let data = try JSONEncoder().encode(value)
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        EngageLogger.verbose("Core.Storage", "file persisted name=\(url.lastPathComponent) bytes=\(data.count)")
     }
 }
 
@@ -436,15 +514,26 @@ private final class SecureBlobStore: @unchecked Sendable {
     init(directory: URL) { self.directory = directory }
 
     func read<T: Decodable>(_ type: T.Type, account: SecureAccount) -> T? {
-        guard let data = readData(account: account) else { return nil }
-        return try? JSONDecoder().decode(type, from: data)
+        guard let data = readData(account: account) else {
+            EngageLogger.verbose("Core.SecureStore", "read account=\(account.rawValue) present=false")
+            return nil
+        }
+        let decoded = try? JSONDecoder().decode(type, from: data)
+        EngageLogger.verbose(
+            "Core.SecureStore",
+            "read account=\(account.rawValue) present=true decoded=\(decoded != nil) bytes=\(data.count)"
+        )
+        return decoded
     }
 
     func write<T: Encodable>(_ value: T, account: SecureAccount) throws {
-        try writeData(JSONEncoder().encode(value), account: account)
+        let data = try JSONEncoder().encode(value)
+        EngageLogger.debug("Core.SecureStore", "write account=\(account.rawValue) bytes=\(data.count)")
+        try writeData(data, account: account)
     }
 
     func delete(account: SecureAccount) throws {
+        EngageLogger.debug("Core.SecureStore", "delete account=\(account.rawValue)")
         #if canImport(Security)
         let status = SecItemDelete(query(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {

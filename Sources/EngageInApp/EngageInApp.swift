@@ -50,16 +50,22 @@ public final class InAppOverlays: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return delegate }
         set {
             lock.lock(); delegate = newValue; let changed = onChanged; lock.unlock()
+            EngageLogger.info("InApp.Overlay", "display delegate changed present=\(newValue != nil)")
             changed?()
         }
     }
 
-    public func pause() { lock.lock(); pauseCount += 1; lock.unlock() }
+    public func pause() {
+        lock.lock(); pauseCount += 1; let depth = pauseCount; lock.unlock()
+        EngageLogger.info("InApp.Overlay", "paused depth=\(depth)")
+    }
     public func resume() {
         lock.lock()
         pauseCount = max(0, pauseCount - 1)
         let changed = onChanged
+        let depth = pauseCount
         lock.unlock()
+        EngageLogger.info("InApp.Overlay", "resumed depth=\(depth)")
         changed?()
     }
 
@@ -76,6 +82,10 @@ public final class InApp: @unchecked Sendable {
 
     init(context: EngageModuleContext) {
         self.context = context
+        EngageLogger.info(
+            "InApp",
+            "initializing generation=\(context.generation.value) installationId=\(context.installationId.value ?? "none")"
+        )
         let history = InAppHistory(generation: { context.generation.value })
         if !context.installationActive.value { history.clearAll() }
         runtime = InAppRuntime(
@@ -113,30 +123,41 @@ public final class InApp: @unchecked Sendable {
             placements[key] = state
         }
         lock.unlock()
+        EngageLogger.info("InApp", "placement subscribed key=\(key) existing=\(state.value?.messageId ?? "none")")
         Task { [weak runtime] in await runtime?.requestEvaluation() }
         return state
     }
 
     public func recordVisible(_ content: InAppContent) {
+        EngageLogger.info("InApp", "content visible messageId=\(content.messageId) variant=\(content.variantId ?? "none")")
         Task { [weak runtime] in await runtime?.record(content, interaction: .impression) }
     }
     public func recordClick(_ content: InAppContent) {
+        EngageLogger.info("InApp", "content clicked messageId=\(content.messageId) variant=\(content.variantId ?? "none")")
         Task { [weak runtime] in await runtime?.record(content, interaction: .click) }
     }
     public func recordDismiss(_ content: InAppContent) {
+        EngageLogger.info("InApp", "content dismissed messageId=\(content.messageId) variant=\(content.variantId ?? "none")")
         Task { [weak runtime] in await runtime?.record(content, interaction: .dismiss) }
     }
     public func recordConversion(_ content: InAppContent) {
+        EngageLogger.info("InApp", "conversion reported messageId=\(content.messageId) variant=\(content.variantId ?? "none")")
         Task { [weak runtime] in await runtime?.record(content, interaction: .conversion) }
     }
     public func recordRenderFailure(_ content: InAppContent) {
+        EngageLogger.warning("InApp", "render failed messageId=\(content.messageId) variant=\(content.variantId ?? "none")")
         Task { [weak runtime] in await runtime?.renderFailed(content) }
     }
     public func executeAction(_ name: String, arguments: EngagePayload) {
-        Task { _ = await context.executeAction(name, arguments: arguments) }
+        EngageLogger.info("InApp", "action requested name=\(name) argumentKeys=\(arguments.keys.sorted())")
+        Task {
+            let completed = await context.executeAction(name, arguments: arguments)
+            EngageLogger.info("InApp", "action finished name=\(name) completed=\(completed)")
+        }
     }
 
     func overlayClosed() {
+        EngageLogger.debug("InApp", "overlay closed")
         Task { [weak runtime] in await runtime?.requestEvaluation() }
     }
 
@@ -182,10 +203,15 @@ private actor InAppRuntime {
             installationSeed: { context.installationId.value ?? context.config.appKey },
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         )
+        EngageLogger.debug("InApp.Runtime", "created generation=\(currentGeneration)")
     }
 
     func start() {
-        guard observationTasks.isEmpty else { return }
+        guard observationTasks.isEmpty else {
+            EngageLogger.debug("InApp.Runtime", "start ignored reason=already_started")
+            return
+        }
+        EngageLogger.info("InApp.Runtime", "starting observers")
         let remoteDocuments = context.documents(.inApp)
         let privacy = context.privacy
         let features = context.enabledFeatures
@@ -214,37 +240,58 @@ private actor InAppRuntime {
             },
         ]
         Task { await runtimeStateChanged() }
+        EngageLogger.info("InApp.Runtime", "observers started count=\(observationTasks.count)")
     }
 
     func wipe() async {
+        EngageLogger.warning("InApp.Runtime", "wipe started")
         delayedEvaluation?.cancel()
         history.clearAll()
         documents = []
         enabled = false
         evaluator.resetContext()
         await clearPresentations()
+        EngageLogger.warning("InApp.Runtime", "wipe completed")
     }
 
-    func requestEvaluation() async { await evaluate() }
+    func requestEvaluation() async {
+        EngageLogger.verbose("InApp.Runtime", "evaluation requested")
+        await evaluate()
+    }
 
     func record(_ content: InAppContent, interaction: InAppInteraction) async {
-        guard enabled, let candidate = resolutions[content.identity] else { return }
+        guard enabled, let candidate = resolutions[content.identity] else {
+            EngageLogger.warning(
+                "InApp.Runtime",
+                "interaction ignored messageId=\(content.messageId) type=\(interaction.rawValue) reason=unknown_or_disabled"
+            )
+            return
+        }
         switch interaction {
         case .impression: evaluator.recordImpression(candidate)
         case .dismiss: evaluator.recordDismiss(candidate)
         case .click, .conversion: break
         }
-        await context.enqueue(type: "INTERACTION_TRACKED", payload: [
+        let queued = await context.enqueue(type: "INTERACTION_TRACKED", payload: [
             "experienceId": .string(candidate.campaign.experienceId),
             "messageId": .string(candidate.campaign.messageId),
             "variantId": (candidate.variant.id ?? candidate.variant.key).map(JSONValue.string) ?? .null,
             "type": .string(interaction.rawValue),
         ])
+        EngageLogger.info(
+            "InApp.Runtime",
+            "interaction queued experienceId=\(candidate.campaign.experienceId) " +
+                "messageId=\(candidate.campaign.messageId) type=\(interaction.rawValue) queued=\(queued)"
+        )
         if interaction == .impression || interaction == .dismiss { await evaluate() }
     }
 
     func renderFailed(_ content: InAppContent) async {
-        guard let candidate = resolutions[content.identity] else { return }
+        guard let candidate = resolutions[content.identity] else {
+            EngageLogger.debug("InApp.Runtime", "render failure ignored messageId=\(content.messageId) reason=unknown")
+            return
+        }
+        EngageLogger.warning("InApp.Runtime", "render failure consuming messageId=\(content.messageId)")
         evaluator.consume(candidate)
         let failedPlacementKeys = activePlacements.compactMap { key, active in
             active.publicContent.identity == content.identity ? key : nil
@@ -260,12 +307,17 @@ private actor InAppRuntime {
 
     private func setDocuments(_ value: [RemoteDocument]) async {
         documents = value
+        EngageLogger.debug("InApp.Runtime", "documents received count=\(value.count)")
         await runtimeStateChanged()
     }
 
     private func runtimeStateChanged() async {
         let generation = context.generation.value
         if generation != currentGeneration {
+            EngageLogger.info(
+                "InApp.Runtime",
+                "generation changed previous=\(currentGeneration) next=\(generation); resetting context"
+            )
             currentGeneration = generation
             evaluator.resetContext()
             activePlacements = [:]
@@ -275,7 +327,12 @@ private actor InAppRuntime {
             && context.privacy.value == .optedIn
             && context.enabledFeatures.value.contains(.inApp)
         enabled = canRun
-        evaluator.replaceCampaigns(canRun ? documents.compactMap(InAppDocumentParser.parse) : [])
+        let campaigns = canRun ? documents.compactMap(InAppDocumentParser.parse) : []
+        evaluator.replaceCampaigns(campaigns)
+        EngageLogger.info(
+            "InApp.Runtime",
+            "state updated enabled=\(enabled) campaigns=\(campaigns.count) foreground=\(context.foreground.value)"
+        )
         if canRun, context.foreground.value, !evaluator.isForeground {
             evaluator.onSignal(.appOpened)
         }
@@ -288,26 +345,40 @@ private actor InAppRuntime {
             await wipe()
             return
         }
-        guard enabled else { return }
-        switch signal {
-        case .appOpened: evaluator.onSignal(.appOpened)
-        case .appBackgrounded: evaluator.onSignal(.appBackgrounded)
-        case let .event(name, _): evaluator.onSignal(.event(name))
-        case let .screenViewed(key): evaluator.onSignal(.screenViewed(key))
-        case .screenCleared: evaluator.onSignal(.screenCleared)
-        case .networkAvailable, .localDataWiped: break
+        guard enabled else {
+            EngageLogger.verbose("InApp.Runtime", "signal ignored reason=disabled")
+            return
         }
+        let signalType: String
+        switch signal {
+        case .appOpened: signalType = "appOpened"; evaluator.onSignal(.appOpened)
+        case .appBackgrounded: signalType = "appBackgrounded"; evaluator.onSignal(.appBackgrounded)
+        case let .event(name, _): signalType = "event:\(name)"; evaluator.onSignal(.event(name))
+        case let .screenViewed(key): signalType = "screen:\(key)"; evaluator.onSignal(.screenViewed(key))
+        case .screenCleared: signalType = "screenCleared"; evaluator.onSignal(.screenCleared)
+        case .networkAvailable: signalType = "networkAvailable"
+        case .localDataWiped: signalType = "localDataWiped"
+        }
+        EngageLogger.debug("InApp.Runtime", "signal applied type=\(signalType)")
         await evaluate()
     }
 
     private func evaluate() async {
         delayedEvaluation?.cancel()
         delayedEvaluation = nil
-        guard enabled else { return }
+        guard enabled else {
+            EngageLogger.verbose("InApp.Runtime", "evaluation skipped reason=disabled")
+            return
+        }
         let candidates = evaluator.candidates()
+        EngageLogger.debug(
+            "InApp.Runtime",
+            "evaluation candidates=\(candidates.count) placements=\(placementStates().keys.sorted())"
+        )
         updatePlacements(candidates)
         await updateOverlay(candidates)
         if let delay = evaluator.nextEvaluationDelayNanoseconds() {
+            EngageLogger.verbose("InApp.Runtime", "next evaluation scheduled delayNanoseconds=\(delay)")
             delayedEvaluation = Task { [weak self] in
                 do { try await Task.sleep(nanoseconds: delay) } catch { return }
                 await self?.evaluate()
@@ -330,9 +401,15 @@ private actor InAppRuntime {
                 activePlacements[key] = selected
                 resolutions[selected.publicContent.identity] = selected
                 state.set(selected.publicContent)
+                EngageLogger.info(
+                    "InApp.Runtime",
+                    "placement selected key=\(key) experienceId=\(selected.campaign.experienceId) " +
+                        "messageId=\(selected.campaign.messageId)"
+                )
             } else {
                 activePlacements[key] = nil
                 state.set(nil)
+                EngageLogger.debug("InApp.Runtime", "placement cleared key=\(key)")
             }
         }
     }
@@ -347,26 +424,39 @@ private actor InAppRuntime {
             guard let active = resolutions[activeContent.identity],
                   evaluator.remainsContextuallyEligible(active) else {
                 await MainActor.run { InAppPresenter.shared.dismiss(reportDismissal: false) }
+                EngageLogger.info("InApp.Runtime", "active overlay dismissed reason=no_longer_eligible")
                 return
             }
             guard let challenger = overlays.first(where: { $0.instanceKey != active.instanceKey }) else { return }
             switch challenger.campaign.conflictPolicy {
             case .queue:
+                EngageLogger.debug("InApp.Runtime", "challenger queued messageId=\(challenger.campaign.messageId)")
                 break
             case .skip:
                 evaluator.consume(challenger)
+                EngageLogger.debug("InApp.Runtime", "challenger skipped messageId=\(challenger.campaign.messageId)")
             case .replaceLowerPriority where challenger.campaign.priority > active.campaign.priority:
                 await MainActor.run { InAppPresenter.shared.dismiss(reportDismissal: false) }
+                EngageLogger.info(
+                    "InApp.Runtime",
+                    "active overlay replaced active=\(active.campaign.messageId) challenger=\(challenger.campaign.messageId)"
+                )
             case .replaceLowerPriority:
                 break
             }
             return
         }
-        guard !self.overlays.isPaused,
-              let selected = overlays.first,
-              let owner else { return }
+        guard !self.overlays.isPaused else {
+            EngageLogger.debug("InApp.Runtime", "overlay selection deferred reason=paused")
+            return
+        }
+        guard let selected = overlays.first, let owner else {
+            EngageLogger.verbose("InApp.Runtime", "overlay selection skipped reason=no_candidate_or_owner")
+            return
+        }
         let content = selected.publicContent
         let decision = await MainActor.run { self.overlays.decision(for: content) }
+        EngageLogger.info("InApp.Runtime", "overlay decision messageId=\(content.messageId) decision=\(decision)")
         switch decision {
         case .deferDisplay:
             return
@@ -375,6 +465,7 @@ private actor InAppRuntime {
         case .allow:
             resolutions[content.identity] = selected
             let shown = await MainActor.run { InAppPresenter.shared.present(content, owner: owner) }
+            EngageLogger.info("InApp.Runtime", "overlay presentation result messageId=\(content.messageId) shown=\(shown)")
             if !shown {
                 delayedEvaluation = Task { [weak self] in
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -385,6 +476,10 @@ private actor InAppRuntime {
     }
 
     private func clearPresentations() async {
+        EngageLogger.debug(
+            "InApp.Runtime",
+            "clearing presentations placements=\(activePlacements.count) resolutions=\(resolutions.count)"
+        )
         delayedEvaluation?.cancel()
         delayedEvaluation = nil
         activePlacements = [:]
@@ -404,7 +499,10 @@ extension InAppContent {
 /// `EngageCore.start(config:)` first, then `InAppModule.activate()`.
 public enum InAppModule {
     @discardableResult
-    public static func activate() -> InApp { InAppHolder.shared }
+    public static func activate() -> InApp {
+        EngageLogger.debug("InApp", "module activation requested")
+        return InAppHolder.shared
+    }
 
     public static var shared: InApp { activate() }
 }

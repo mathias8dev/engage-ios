@@ -12,13 +12,29 @@ import EngageCore
 
     @discardableResult
     func present(_ content: InAppContent, owner: InApp) -> Bool {
-        guard presented == nil, let host = topViewController() else { return false }
+        guard presented == nil else {
+            EngageLogger.debug(
+                "InApp.Presenter",
+                "presentation rejected messageId=\(content.messageId) active=\(activeContent?.messageId ?? "none")"
+            )
+            return false
+        }
+        guard let host = topViewController() else {
+            EngageLogger.debug("InApp.Presenter", "presentation rejected messageId=\(content.messageId) reason=no_host")
+            return false
+        }
+        EngageLogger.info(
+            "InApp.Presenter",
+            "presenting messageId=\(content.messageId) format=\(String(describing: content.overlayFormat)) " +
+                "animation=\(String(describing: content.animation))"
+        )
         let controller = InAppOverlayController(content: content, owner: owner)
         presented = controller
         activeContent = content
         controller.onClosed = { [weak self, weak owner] in
             self?.presented = nil
             self?.activeContent = nil
+            EngageLogger.info("InApp.Presenter", "closed messageId=\(content.messageId)")
             owner?.overlayClosed()
         }
         switch content.animation {
@@ -30,11 +46,20 @@ import EngageCore
         case .none: break
         }
         host.present(controller, animated: content.animation != .none)
+        EngageLogger.debug("InApp.Presenter", "presentation requested messageId=\(content.messageId)")
         return true
     }
 
     func dismiss(reportDismissal: Bool) {
-        guard let presented else { activeContent = nil; return }
+        guard let presented else {
+            activeContent = nil
+            EngageLogger.verbose("InApp.Presenter", "dismiss ignored reason=no_active_overlay")
+            return
+        }
+        EngageLogger.info(
+            "InApp.Presenter",
+            "dismiss requested messageId=\(presented.content.messageId) reportDismissal=\(reportDismissal)"
+        )
         presented.close(track: reportDismissal)
     }
 
@@ -72,6 +97,7 @@ private final class InAppOverlayController: UIViewController, UIGestureRecognize
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        EngageLogger.debug("InApp.Presenter", "overlay view loading messageId=\(content.messageId)")
         view.backgroundColor = content.backdrop == .dimmed
             ? UIColor.black.withAlphaComponent(0.48)
             : .clear
@@ -95,6 +121,7 @@ private final class InAppOverlayController: UIViewController, UIGestureRecognize
             view.addGestureRecognizer(recognizer)
         }
         if content.dismissal == .autoDismiss, let seconds = content.autoDismissSeconds {
+            EngageLogger.debug("InApp.Presenter", "auto-dismiss scheduled messageId=\(content.messageId) seconds=\(seconds)")
             DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(max(0, seconds))) { [weak self] in
                 self?.close(track: true)
             }
@@ -108,7 +135,11 @@ private final class InAppOverlayController: UIViewController, UIGestureRecognize
     @objc private func backgroundTap() { close(track: true) }
 
     func close(track: Bool) {
-        guard !closed else { return }
+        guard !closed else {
+            EngageLogger.verbose("InApp.Presenter", "close ignored messageId=\(content.messageId) reason=already_closed")
+            return
+        }
+        EngageLogger.info("InApp.Presenter", "closing messageId=\(content.messageId) trackDismissal=\(track)")
         closed = true
         if track { owner.recordDismiss(content) }
         dismiss(animated: content.animation != .none) { [weak self] in self?.onClosed?() }
@@ -248,6 +279,10 @@ public final class EngageInAppContentView: UIView {
         self.onDismissRequested = onDismissRequested
         self.onRenderFailed = onRenderFailed
         super.init(frame: .zero)
+        EngageLogger.debug(
+            "InApp.Render",
+            "content view creating messageId=\(content.messageId) variant=\(content.variantId ?? "none") type=\(content.type)"
+        )
         do {
             let child = try render()
             renderedView = child
@@ -260,7 +295,9 @@ public final class EngageInAppContentView: UIView {
                 child.bottomAnchor.constraint(equalTo: bottomAnchor),
                 widthAnchor.constraint(lessThanOrEqualToConstant: 720),
             ])
+            EngageLogger.debug("InApp.Render", "content view created messageId=\(content.messageId) child=\(type(of: child))")
         } catch {
+            EngageLogger.error("InApp.Render", "content view creation failed messageId=\(content.messageId)", error: error)
             DispatchQueue.main.async { [weak self] in self?.reportRenderFailure() }
         }
     }
@@ -270,6 +307,7 @@ public final class EngageInAppContentView: UIView {
 
     public override func didMoveToWindow() {
         super.didMoveToWindow()
+        EngageLogger.verbose("InApp.Render", "content window changed messageId=\(content.messageId) attached=\(window != nil)")
         DispatchQueue.main.async { [weak self] in self?.reportVisibilityIfNeeded() }
     }
 
@@ -310,6 +348,7 @@ public final class EngageInAppContentView: UIView {
     }
 
     private func divView() throws -> UIView {
+        EngageLogger.debug("InApp.Render", "DivKit scene parsing messageId=\(content.messageId)")
         let data = try JSONEncoder().encode(JSONValue.object(content.payload))
         let components = DivKitComponents(urlHandler: DivUrlHandlerDelegate { [weak self] url in
             self?.handle(url)
@@ -324,10 +363,12 @@ public final class EngageInAppContentView: UIView {
                 DivViewSource(kind: .data(data), cardId: DivCardID(rawValue: content.messageId))
             )
             guard view.cardSize != nil else {
+                EngageLogger.warning("InApp.Render", "DivKit scene rejected messageId=\(content.messageId)")
                 self?.reportRenderFailure()
                 return
             }
             self?.markContentReady()
+            EngageLogger.debug("InApp.Render", "DivKit scene bound messageId=\(content.messageId)")
         }
         return view
     }
@@ -338,18 +379,20 @@ public final class EngageInAppContentView: UIView {
               ["http", "https"].contains(url.scheme?.lowercased()) else {
             throw RenderError.invalidPayload
         }
+        EngageLogger.debug("InApp.Render", "image loading messageId=\(content.messageId) host=\(url.host ?? "unknown")")
         let image = UIImageView()
         image.contentMode = content.payload.string("contentMode") == "FIT" ? .scaleAspectFit : .scaleAspectFill
         image.clipsToBounds = true
         image.isUserInteractionEnabled = true
         image.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(imageTapped)))
-        URLSession.shared.dataTask(with: url) { [weak self, weak image] data, response, _ in
+        URLSession.shared.dataTask(with: url) { [weak self, weak image] data, response, error in
             guard let response = response as? HTTPURLResponse,
                   (200..<300).contains(response.statusCode),
                   let data,
                   let value = UIImage(data: data),
                   value.size.width > 0,
                   value.size.height > 0 else {
+                EngageLogger.error("InApp.Render", "image load failed messageId=\(self?.content.messageId ?? "unknown")", error: error)
                 DispatchQueue.main.async { self?.reportRenderFailure() }
                 return
             }
@@ -361,6 +404,10 @@ public final class EngageInAppContentView: UIView {
                     multiplier: value.size.height / value.size.width
                 ).isActive = true
                 self.markContentReady()
+                EngageLogger.debug(
+                    "InApp.Render",
+                    "image loaded messageId=\(self.content.messageId) bytes=\(data.count) width=\(value.size.width) height=\(value.size.height)"
+                )
             }
         }.resume()
         return image
@@ -377,8 +424,10 @@ public final class EngageInAppContentView: UIView {
         if let raw = content.payload.string("url"),
            let url = URL(string: raw),
            ["http", "https"].contains(url.scheme?.lowercased()) {
+            EngageLogger.debug("InApp.Render", "web URL loading messageId=\(content.messageId) host=\(url.host ?? "unknown")")
             web.load(URLRequest(url: url))
         } else if let html = content.payload.string("html") {
+            EngageLogger.debug("InApp.Render", "web HTML loading messageId=\(content.messageId) bytes=\(html.utf8.count)")
             web.loadHTMLString(html, baseURL: content.payload.string("baseUrl").flatMap(URL.init(string:)))
         } else {
             throw RenderError.invalidPayload
@@ -387,6 +436,10 @@ public final class EngageInAppContentView: UIView {
     }
 
     private func handle(_ url: URL) {
+        EngageLogger.info(
+            "InApp.Render",
+            "navigation messageId=\(content.messageId) scheme=\(url.scheme ?? "none") host=\(url.host ?? "none")"
+        )
         owner.recordClick(content)
         guard url.scheme?.lowercased() == "engage" else {
             UIApplication.shared.open(url)
@@ -401,6 +454,7 @@ public final class EngageInAppContentView: UIView {
             guard let encoded = url.pathComponents.dropFirst().first,
                   let name = encoded.removingPercentEncoding, !name.isEmpty else { return }
             owner.executeAction(name, arguments: actionArguments(url))
+            EngageLogger.debug("InApp.Render", "named action messageId=\(content.messageId) name=\(name)")
         default:
             break
         }
@@ -418,15 +472,20 @@ public final class EngageInAppContentView: UIView {
     @objc private func imageTapped() { owner.recordClick(content) }
 
     private func reportRenderFailure() {
-        guard !renderFailureReported else { return }
+        guard !renderFailureReported else {
+            EngageLogger.verbose("InApp.Render", "render failure deduplicated messageId=\(content.messageId)")
+            return
+        }
         renderFailureReported = true
         contentReady = false
+        EngageLogger.warning("InApp.Render", "render failed messageId=\(content.messageId)")
         if let onRenderFailed { onRenderFailed() } else { owner.recordRenderFailure(content) }
     }
 
     private func markContentReady() {
         guard !renderFailureReported else { return }
         contentReady = true
+        EngageLogger.debug("InApp.Render", "content ready messageId=\(content.messageId)")
         contentSizeDidChange()
         reportVisibilityIfNeeded()
     }
@@ -451,6 +510,7 @@ public final class EngageInAppContentView: UIView {
         let totalArea = frame.width * frame.height
         guard totalArea > 0, visible.width * visible.height >= totalArea * 0.5 else { return }
         visibleReported = true
+        EngageLogger.info("InApp.Render", "visibility threshold reached messageId=\(content.messageId)")
         owner.recordVisible(content)
     }
 }
@@ -466,14 +526,20 @@ extension EngageInAppContentView: WKNavigationDelegate {
             return .cancel
         }
         if action.navigationType == .linkActivated { owner.recordClick(content) }
+        EngageLogger.verbose(
+            "InApp.Render",
+            "web navigation allowed messageId=\(content.messageId) type=\(action.navigationType.rawValue)"
+        )
         return .allow
     }
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        EngageLogger.debug("InApp.Render", "web content loaded messageId=\(content.messageId)")
         markContentReady()
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        EngageLogger.error("InApp.Render", "web navigation failed messageId=\(content.messageId)", error: error)
         reportRenderFailure()
     }
 
@@ -482,6 +548,7 @@ extension EngageInAppContentView: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
+        EngageLogger.error("InApp.Render", "web provisional navigation failed messageId=\(content.messageId)", error: error)
         reportRenderFailure()
     }
 }
@@ -493,9 +560,11 @@ public struct EngageInAppPlacement: UIViewRepresentable {
     public init(_ key: String, inApp: InApp = InAppModule.shared) {
         self.key = key
         self.inApp = inApp
+        EngageLogger.debug("InApp.Placement", "SwiftUI placement initialized key=\(key)")
     }
 
     public func makeUIView(context: Context) -> EngageInAppPlacementView {
+        EngageLogger.debug("InApp.Placement", "SwiftUI placement view creating key=\(key)")
         EngageInAppPlacementView(key: key, inApp: inApp)
     }
     public func updateUIView(_ uiView: EngageInAppPlacementView, context: Context) {}
@@ -513,6 +582,7 @@ public final class EngageInAppPlacementView: UIView {
 
     private init(state: EngageState<InAppContent?>, owner: InApp) {
         super.init(frame: .zero)
+        EngageLogger.debug("InApp.Placement", "UIKit placement view created")
         task = Task { [weak self] in
             for await content in state.updates {
                 guard !Task.isCancelled else { return }
@@ -521,6 +591,10 @@ public final class EngageInAppPlacementView: UIView {
                     if bounds.height > 0 { reservedHeight = bounds.height }
                     subviews.forEach { $0.removeFromSuperview() }
                     guard let content else {
+                        EngageLogger.verbose(
+                            "InApp.Placement",
+                            "placement empty reservedHeight=\(reservedHeight) policy=\(emptyState)"
+                        )
                         isHidden = emptyState == .collapse
                         invalidateIntrinsicContentSize()
                         return
@@ -529,6 +603,7 @@ public final class EngageInAppPlacementView: UIView {
                         emptyState = presentation.emptyState
                     }
                     isHidden = false
+                    EngageLogger.info("InApp.Placement", "placement rendering messageId=\(content.messageId)")
                     let view = EngageInAppContentView(content: content, owner: owner)
                     addSubview(view)
                     view.translatesAutoresizingMaskIntoConstraints = false

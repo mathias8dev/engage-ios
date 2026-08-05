@@ -134,18 +134,30 @@ private final class PreferenceCenterViewController: UITableViewController {
         guard rows.indices.contains(indexPath.section),
               rows[indexPath.section].indices.contains(indexPath.row) else { return }
         let row = rows[indexPath.section][indexPath.row]
-        switch row.scope {
-        case .installation:
-            EngageCore.installation.editSubscriptions {
-                if sender.isOn { $0.subscribe(row.listKey) } else { $0.unsubscribe(row.listKey) }
-            }
-        case let .profile(channel):
-            EngageCore.profile.editSubscriptions {
-                if sender.isOn {
-                    $0.subscribe(row.listKey, channels: [channel])
-                } else {
-                    $0.unsubscribe(row.listKey, channels: [channel])
+        Task {
+            let requestedValue = sender.isOn
+            do {
+                switch row.scope {
+                case .installation:
+                    try await EngageCore.installation.editSubscriptions {
+                        if requestedValue { $0.subscribe(row.listKey) } else { $0.unsubscribe(row.listKey) }
+                    }
+                case let .profile(channel):
+                    try await EngageCore.profile.editSubscriptions {
+                        if requestedValue {
+                            $0.subscribe(row.listKey, channels: [channel])
+                        } else {
+                            $0.unsubscribe(row.listKey, channels: [channel])
+                        }
+                    }
                 }
+            } catch {
+                sender.setOn(!requestedValue, animated: true)
+                EngageLogger.error(
+                    "Core.PreferenceCenter.UI",
+                    "subscription edit failed list=\(row.listKey)",
+                    error: error
+                )
             }
         }
     }

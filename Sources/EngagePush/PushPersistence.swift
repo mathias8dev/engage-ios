@@ -1,4 +1,5 @@
 import Foundation
+import EngageCore
 
 struct PushStoredState: Codable, Equatable, Sendable {
     static let disabledMarker = "__disabled__"
@@ -47,10 +48,20 @@ final class PushPersistence: @unchecked Sendable {
         stored = (try? Data(contentsOf: url)).flatMap {
             try? JSONDecoder().decode(PushStoredState.self, from: $0)
         } ?? PushStoredState()
+        EngageLogger.info(
+            "Push.Storage",
+            "loaded subscription=\(stored.subscription) hasToken=\(stored.token != nil) " +
+                "pendingSubscription=\(stored.pendingSubscription) tokenRegistered=\(stored.registeredTokenHash != nil)"
+        )
     }
 
     var value: PushStoredState {
         lock.lock(); defer { lock.unlock() }
+        EngageLogger.verbose(
+            "Push.Storage",
+            "state read subscription=\(stored.subscription) hasToken=\(stored.token != nil) " +
+                "pendingSubscription=\(stored.pendingSubscription)"
+        )
         return stored
     }
 
@@ -59,17 +70,25 @@ final class PushPersistence: @unchecked Sendable {
         defer { lock.unlock() }
         var candidate = stored
         operation(&candidate)
+        EngageLogger.debug(
+            "Push.Storage",
+            "state persisting subscription=\(candidate.subscription) hasToken=\(candidate.token != nil) " +
+                "pendingSubscription=\(candidate.pendingSubscription) tokenRegistered=\(candidate.registeredTokenHash != nil)"
+        )
         let data = try JSONEncoder().encode(candidate)
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         stored = candidate
+        EngageLogger.debug("Push.Storage", "state persisted bytes=\(data.count)")
     }
 
     func wipe() throws {
+        EngageLogger.warning("Push.Storage", "state wipe started")
         lock.lock()
         defer { lock.unlock() }
         stored = PushStoredState()
         do { try FileManager.default.removeItem(at: url) }
         catch let error as CocoaError where error.code == .fileNoSuchFile { }
+        EngageLogger.warning("Push.Storage", "state wiped")
     }
 }
 

@@ -33,15 +33,18 @@ public struct EngageConfig: @unchecked Sendable {
     public let appKey: String
     public let endpoint: URL
     public let push: PushConfig
+    public let logLevel: EngageLogLevel
 
     public init(
         appKey: String,
         endpoint: URL = URL(string: "https://api.engage.io/v1/")!,
-        push: PushConfig = PushConfig()
+        push: PushConfig = PushConfig(),
+        logLevel: EngageLogLevel = .info
     ) {
         precondition(appKey.hasPrefix("eng_app_"), "EngageConfig.appKey must start with eng_app_")
         self.appKey = appKey
         self.endpoint = endpoint
         self.push = push
+        self.logLevel = logLevel
     }
 }

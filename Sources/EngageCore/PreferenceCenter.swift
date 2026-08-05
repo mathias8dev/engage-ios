@@ -26,17 +26,26 @@ public final class PreferenceCenter: @unchecked Sendable {
     private var centers: [String: EngageState<PreferenceCenterSnapshot?>] = [:]
     private var observationTasks: [String: [Task<Void, Never>]] = [:]
 
-    init(runtime: CoreRuntime) { self.runtime = runtime }
+    init(runtime: CoreRuntime) {
+        self.runtime = runtime
+        EngageLogger.debug("Core.Preferences", "preference center service initialized")
+    }
 
     public func center(_ key: String? = nil) -> EngageState<PreferenceCenterSnapshot?> {
         if let key { precondition(CoreRuntime.keyPattern(key)) }
         let identity = key ?? "\u{0}default"
+        EngageLogger.info("Core.Preferences", "center requested key=\(key ?? "default")")
         lock.lock()
-        if let value = centers[identity] { lock.unlock(); return value }
+        if let value = centers[identity] {
+            lock.unlock()
+            EngageLogger.debug("Core.Preferences", "existing center returned key=\(key ?? "default")")
+            return value
+        }
         let state = EngageState<PreferenceCenterSnapshot?>(nil)
         centers[identity] = state
         lock.unlock()
         observe(state: state, identity: identity, requestedKey: key)
+        EngageLogger.debug("Core.Preferences", "center observer created key=\(key ?? "default")")
         return state
     }
 
@@ -47,7 +56,13 @@ public final class PreferenceCenter: @unchecked Sendable {
     ) {
         let update: @Sendable () async -> Void = { [weak self, weak state] in
             guard let self, let state else { return }
-            state.set(await self.project(requestedKey: requestedKey))
+            let projection = await self.project(requestedKey: requestedKey)
+            EngageLogger.debug(
+                "Core.Preferences",
+                "center projected key=\(requestedKey ?? "default") available=\(projection != nil) " +
+                    "sections=\(projection?.sections.count ?? 0)"
+            )
+            state.set(projection)
         }
         let tasks = [
             Task { [runtime] in for await _ in runtime.syncSnapshot.updates { await update() } },
@@ -62,6 +77,7 @@ public final class PreferenceCenter: @unchecked Sendable {
     }
 
     private func project(requestedKey: String?) async -> PreferenceCenterSnapshot? {
+        EngageLogger.verbose("Core.Preferences", "projection started key=\(requestedKey ?? "default")")
         let source = await runtime.preferenceProjectionSource()
         let snapshot = source.snapshot
         guard source.privacy == .optedIn,
@@ -70,13 +86,19 @@ public final class PreferenceCenter: @unchecked Sendable {
               let payload = snapshot.documents.first(where: {
                   $0.module == .preferences && $0.key == "subscriptions"
               })?.payload,
-              let centerDefinitions = payload.object("centers") else { return nil }
+              let centerDefinitions = payload.object("centers") else {
+            EngageLogger.verbose("Core.Preferences", "projection unavailable key=\(requestedKey ?? "default")")
+            return nil
+        }
         let selected = centerDefinitions.first { key, value in
             guard let definition = value.objectValue?.object("definition") else { return false }
             return requestedKey.map { $0 == key } ?? (definition.bool("isDefault") == true)
         }
         guard let (key, value) = selected,
-              let definition = value.objectValue?.object("definition") else { return nil }
+              let definition = value.objectValue?.object("definition") else {
+            EngageLogger.debug("Core.Preferences", "center definition not found key=\(requestedKey ?? "default")")
+            return nil
+        }
         let catalog = payload.array("catalog")?.compactMap(\.objectValue) ?? []
         var installation: [String: Bool] = [:]
         for value in payload.array("installation") ?? [] {
@@ -143,7 +165,7 @@ public final class PreferenceCenter: @unchecked Sendable {
             displayName: localized(definition["displayName"]) ?? key,
             description: localized(definition["description"]),
             sections: sections
-        )
+        ).alsoLogged
     }
 }
 
@@ -161,4 +183,11 @@ private func localized(_ value: JSONValue?) -> String? {
     let locale = Locale.current
     let candidates = [locale.identifier.replacingOccurrences(of: "_", with: "-"), locale.languageCode, "default"].compactMap { $0 }
     return candidates.compactMap { values[$0]?.stringValue }.first ?? values.values.compactMap(\.stringValue).first
+}
+
+private extension PreferenceCenterSnapshot {
+    var alsoLogged: PreferenceCenterSnapshot {
+        EngageLogger.info("Core.Preferences", "projection completed key=\(key) sections=\(sections.count)")
+        return self
+    }
 }

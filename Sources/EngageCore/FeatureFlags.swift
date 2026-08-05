@@ -5,7 +5,10 @@ public final class FeatureFlags: @unchecked Sendable {
     private let exposureLock = NSLock()
     private var scheduledExposures: Set<String> = []
 
-    init(runtime: CoreRuntime) { self.runtime = runtime }
+    init(runtime: CoreRuntime) {
+        self.runtime = runtime
+        EngageLogger.debug("Core.Flags", "feature flag service initialized")
+    }
 
     public func getBoolean(_ key: String, default fallback: Bool) -> Bool {
         resolve(key, type: "BOOLEAN")?.boolValue ?? fallback
@@ -25,8 +28,12 @@ public final class FeatureFlags: @unchecked Sendable {
 
     private func resolve(_ key: String, type: String) -> JSONValue? {
         precondition(CoreRuntime.keyPattern(key))
+        EngageLogger.debug("Core.Flags", "evaluation requested key=\(key) type=\(type)")
         guard runtime.privacy.value == .optedIn,
-              runtime.enabledFeatures.value.contains(.featureFlags) else { return nil }
+              runtime.enabledFeatures.value.contains(.featureFlags) else {
+            EngageLogger.debug("Core.Flags", "fallback used key=\(key) reason=privacy_or_feature")
+            return nil
+        }
         let snapshot = runtime.syncSnapshot.value
         guard snapshot.generation == runtime.generation.value,
               let payload = snapshot.documents.first(where: {
@@ -34,7 +41,18 @@ public final class FeatureFlags: @unchecked Sendable {
               })?.payload,
               let flag = payload.object("flags")?.object(key),
               flag.string("type") == type,
-              let value = flag["value"] else { return nil }
+              let value = flag["value"] else {
+            EngageLogger.debug(
+                "Core.Flags",
+                "fallback used key=\(key) reason=missing_or_type_mismatch revision=\(snapshot.revision)"
+            )
+            return nil
+        }
+        EngageLogger.info(
+            "Core.Flags",
+            "evaluated key=\(key) type=\(type) revision=\(flag.integer("revision") ?? snapshot.revision) " +
+                "variant=\(flag.string("variantKey") ?? "none")"
+        )
         scheduleExposure(flagKey: key, flag: flag)
         return value
     }
@@ -42,7 +60,10 @@ public final class FeatureFlags: @unchecked Sendable {
     private func scheduleExposure(flagKey: String, flag: EngagePayload) {
         guard let experimentId = flag.string("experimentId"),
               let variantKey = flag.string("variantKey"),
-              let revision = flag.integer("revision"), revision > 0 else { return }
+              let revision = flag.integer("revision"), revision > 0 else {
+            EngageLogger.verbose("Core.Flags", "exposure not required flagKey=\(flagKey)")
+            return
+        }
         let seed = [
             runtime.installationId.value ?? "", String(runtime.generation.value), experimentId,
             String(revision), variantKey,
@@ -51,9 +72,19 @@ public final class FeatureFlags: @unchecked Sendable {
         exposureLock.lock()
         let inserted = scheduledExposures.insert(operationId).inserted
         exposureLock.unlock()
-        guard inserted else { return }
+        guard inserted else {
+            EngageLogger.verbose("Core.Flags", "exposure deduplicated flagKey=\(flagKey) operationId=\(operationId)")
+            return
+        }
+        EngageLogger.debug(
+            "Core.Flags",
+            "exposure scheduled flagKey=\(flagKey) variant=\(variantKey) revision=\(revision) operationId=\(operationId)"
+        )
         Task {
-            if await runtime.containsExposure(operationId) { return }
+            if await runtime.containsExposure(operationId) {
+                EngageLogger.verbose("Core.Flags", "exposure already persisted operationId=\(operationId)")
+                return
+            }
             do {
                 try await runtime.enqueue(type: "FLAG_EXPOSED", payload: [
                     "flagKey": .string(flagKey),
@@ -62,7 +93,9 @@ public final class FeatureFlags: @unchecked Sendable {
                     "revision": .integer(revision),
                 ], operationId: operationId)
                 try await runtime.markExposure(operationId)
+                EngageLogger.info("Core.Flags", "exposure persisted operationId=\(operationId)")
             } catch {
+                EngageLogger.error("Core.Flags", "exposure failed operationId=\(operationId)", error: error)
                 self.removeScheduledExposure(operationId)
             }
         }
@@ -70,6 +103,7 @@ public final class FeatureFlags: @unchecked Sendable {
 
     private func removeScheduledExposure(_ operationId: String) {
         exposureLock.lock(); scheduledExposures.remove(operationId); exposureLock.unlock()
+        EngageLogger.verbose("Core.Flags", "exposure schedule released operationId=\(operationId)")
     }
 }
 

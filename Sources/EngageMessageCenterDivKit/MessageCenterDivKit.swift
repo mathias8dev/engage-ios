@@ -9,13 +9,18 @@ import EngageMessageCenter
 
 public extension MessageCenter {
     @MainActor func display(from presenter: UIViewController? = nil) {
+        EngageLogger.info("MessageCenter.UI", "display requested hasPresenter=\(presenter != nil)")
         let controller = UIHostingController(rootView: EngageMessageCenterView(messageCenter: self))
         controller.modalPresentationStyle = .pageSheet
         guard let root = presenter ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
-            .flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else { return }
+            .flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else {
+            EngageLogger.warning("MessageCenter.UI", "display rejected reason=no_presenter")
+            return
+        }
         var host = root
         while let presented = host.presentedViewController { host = presented }
         host.present(controller, animated: true)
+        EngageLogger.info("MessageCenter.UI", "display presentation requested")
     }
 }
 
@@ -28,6 +33,7 @@ public struct EngageMessageCenterView: View {
     public init(messageCenter: MessageCenter = MessageCenterModule.shared) {
         self.messageCenter = messageCenter
         pager = messageCenter.inbox.pager(pageSize: 20)
+        EngageLogger.debug("MessageCenter.UI", "SwiftUI view initialized")
     }
 
     public var body: some View {
@@ -81,6 +87,12 @@ public struct EngageMessageCenterView: View {
         .task {
             for await value in pager.state.updates {
                 guard !Task.isCancelled else { return }
+                EngageLogger.verbose(
+                    "MessageCenter.UI",
+                    "pager state entries=\(value.entries.count) refreshing=\(value.isRefreshing) " +
+                        "loadingMore=\(value.isLoadingMore) hasMore=\(value.hasMore) " +
+                        "error=\(String(describing: value.error?.code))"
+                )
                 await MainActor.run { state = value }
             }
         }
@@ -91,6 +103,7 @@ public struct EngageMessageCenterView: View {
                 let active = Set(state.entries.map(\.id))
                 renderings = renderings.filter { active.contains($0.key) }
                 renderings.merge(Dictionary(uniqueKeysWithValues: resolved.map { ($0.entryId, $0) })) { _, new in new }
+                EngageLogger.info("MessageCenter.UI", "renderings applied count=\(resolved.count)")
             }
         }
         .onDisappear { pager.close() }
@@ -103,7 +116,15 @@ private struct DivKitSnapshotView: UIViewRepresentable {
     let snapshot: InboxRenderingSnapshot
     let messageCenter: MessageCenter
     func makeUIView(context: Context) -> DivView {
+        EngageLogger.debug(
+            "MessageCenter.DivKit",
+            "view creating entryId=\(snapshot.entryId) revision=\(snapshot.revision) renderer=\(snapshot.renderer)"
+        )
         let components = DivKitComponents(urlHandler: DivUrlHandlerDelegate { url in
+            EngageLogger.info(
+                "MessageCenter.DivKit",
+                "action entryId=\(snapshot.entryId) scheme=\(url.scheme ?? "none") host=\(url.host ?? "none")"
+            )
             guard url.scheme == "engage", url.host == "action",
                   let name = url.pathComponents.dropFirst().first else {
                 UIApplication.shared.open(url); return
@@ -116,12 +137,17 @@ private struct DivKitSnapshotView: UIViewRepresentable {
     }
     func updateUIView(_ uiView: DivView, context: Context) { update(uiView) }
     private func update(_ view: DivView) {
-        guard let data = try? JSONEncoder().encode(JSONValue.object(snapshot.document)) else { return }
+        guard let data = try? JSONEncoder().encode(JSONValue.object(snapshot.document)) else {
+            EngageLogger.error("MessageCenter.DivKit", "document encoding failed entryId=\(snapshot.entryId)")
+            return
+        }
+        EngageLogger.debug("MessageCenter.DivKit", "source updating entryId=\(snapshot.entryId) bytes=\(data.count)")
         Task {
             await view.setSource(
                 DivViewSource(kind: .data(data), cardId: DivCardID(rawValue: snapshot.entryId.value)),
                 shouldResetPreviousCardData: true
             )
+            EngageLogger.debug("MessageCenter.DivKit", "source updated entryId=\(snapshot.entryId)")
         }
     }
 }
