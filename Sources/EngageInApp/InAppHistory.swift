@@ -23,10 +23,16 @@ final class InAppHistory: @unchecked Sendable {
     private let lock = NSLock()
     private let generation: @Sendable () -> Int64
     private let url: URL
+    private let removeItem: @Sendable (URL) throws -> Void
     private var stored: PersistedInAppHistory
 
-    init(generation: @escaping @Sendable () -> Int64, directory: URL = inAppStorageDirectory()) {
+    init(
+        generation: @escaping @Sendable () -> Int64,
+        directory: URL = inAppStorageDirectory(),
+        removeItem: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    ) {
         self.generation = generation
+        self.removeItem = removeItem
         url = directory.appendingPathComponent("in-app-history.json")
         stored = (try? Data(contentsOf: url)).flatMap {
             try? JSONDecoder().decode(PersistedInAppHistory.self, from: $0)
@@ -83,12 +89,13 @@ final class InAppHistory: @unchecked Sendable {
         EngageLogger.info("InApp.History", "dismiss recorded campaign=\(campaignKey)")
     }
 
-    func clearAll() {
+    func clearAll() throws {
         EngageLogger.warning("InApp.History", "all history clearing generations=\(stored.generations.count)")
         lock.lock()
+        defer { lock.unlock() }
+        do { try removeItem(url) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile { }
         stored = PersistedInAppHistory()
-        try? FileManager.default.removeItem(at: url)
-        lock.unlock()
         EngageLogger.warning("InApp.History", "all history cleared")
     }
 

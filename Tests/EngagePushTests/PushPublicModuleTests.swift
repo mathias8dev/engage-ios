@@ -4,6 +4,7 @@ import EngagePush
 #if canImport(UIKit)
 final class PushPublicModuleTests: XCTestCase {
     func testActivationAndAPNsCallbacksAreAvailableWithoutTestableOrSPIImports() {
+        let prepare: () -> Void = PushModule.prepareForLaunch
         let activate: () -> Push = PushModule.activate
         let registered: (Push, Data) -> Void = { push, token in
             push.didRegisterForRemoteNotifications(deviceToken: token)
@@ -12,6 +13,7 @@ final class PushPublicModuleTests: XCTestCase {
             push.didFailToRegisterForRemoteNotifications(error: error)
         }
         _ = activate
+        _ = prepare
         _ = registered
         _ = failed
     }

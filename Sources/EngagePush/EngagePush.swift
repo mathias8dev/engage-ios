@@ -29,12 +29,11 @@ public enum PushEvent: Sendable {
 
 public final class Push: @unchecked Sendable {
     private let context: EngageModuleContext
-    private let persistence = PushPersistence()
+    private let persistence: PushPersistence
     private let center = UNUserNotificationCenter.current()
     private let eventBus = EngageSignalBus<PushEvent>()
     private let lock = NSLock()
     private var token: String?
-    private var delegateProxy: PushNotificationDelegate?
     private var previousPrivacy: PrivacyState
 
     public let status: EngageState<PushStatus>
@@ -42,6 +41,7 @@ public final class Push: @unchecked Sendable {
 
     init(context: EngageModuleContext) {
         self.context = context
+        persistence = PushPersistence(directory: context.storageDirectory(module: "push"))
         EngageLogger.info(
             "Push",
             "initializing generation=\(context.generation.value) installationId=\(context.installationId.value ?? "none")"
@@ -194,10 +194,8 @@ public final class Push: @unchecked Sendable {
     }
 
     @MainActor private func installDelegate() {
-        let proxy = PushNotificationDelegate(owner: self, downstream: center.delegate)
-        delegateProxy = proxy
-        center.delegate = proxy
-        EngageLogger.info("Push", "notification delegate installed downstream=\(proxy.downstream != nil)")
+        PushDelegateCoordinator.attach(self, center: center)
+        EngageLogger.info("Push", "notification delegate attached")
     }
 
     private func refreshPermission() async {
@@ -410,19 +408,61 @@ public final class Push: @unchecked Sendable {
     }
 }
 
-private final class PushNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
-    weak var owner: Push?
-    weak var downstream: UNUserNotificationCenterDelegate?
-    init(owner: Push, downstream: UNUserNotificationCenterDelegate?) {
-        self.owner = owner; self.downstream = downstream
+private enum BufferedPushEvent {
+    case notification(UNNotification)
+    case response(UNNotificationResponse)
+}
+
+private final class PushNotificationDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var owner: Push?
+    private weak var downstream: UNUserNotificationCenterDelegate?
+    private var buffered: [BufferedPushEvent] = []
+
+    func install(on center: UNUserNotificationCenter) {
+        lock.lock()
+        if center.delegate !== self { downstream = center.delegate }
+        lock.unlock()
+        center.delegate = self
+    }
+
+    func attach(_ owner: Push) {
+        lock.lock()
+        self.owner = owner
+        let pending = buffered
+        buffered.removeAll()
+        lock.unlock()
+        for event in pending {
+            switch event {
+            case .notification(let notification): _ = owner.willPresent(notification)
+            case .response(let response): owner.didReceive(response)
+            }
+        }
+        EngageLogger.info("Push.Delegate", "owner attached buffered=\(pending.count)")
+    }
+
+    private func targetOrBuffer(_ event: BufferedPushEvent) -> Push? {
+        lock.lock(); defer { lock.unlock() }
+        guard let owner else {
+            buffered.append(event)
+            if buffered.count > 64 { buffered.removeFirst(buffered.count - 64) }
+            EngageLogger.debug("Push.Delegate", "event buffered pending=\(buffered.count)")
+            return nil
+        }
+        return owner
+    }
+
+    private var downstreamDelegate: UNUserNotificationCenterDelegate? {
+        lock.lock(); defer { lock.unlock() }
+        return downstream
     }
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
         EngageLogger.verbose("Push.Delegate", "willPresent forwarding")
-        let engage = owner?.willPresent(notification) ?? []
-        let app = await downstream?.userNotificationCenter?(center, willPresent: notification) ?? []
+        let engage = targetOrBuffer(.notification(notification))?.willPresent(notification) ?? []
+        let app = await downstreamDelegate?.userNotificationCenter?(center, willPresent: notification) ?? []
         return engage.union(app)
     }
     func userNotificationCenter(
@@ -430,8 +470,22 @@ private final class PushNotificationDelegate: NSObject, UNUserNotificationCenter
         didReceive response: UNNotificationResponse
     ) async {
         EngageLogger.verbose("Push.Delegate", "didReceive forwarding actionIdentifier=\(response.actionIdentifier)")
-        owner?.didReceive(response)
-        await downstream?.userNotificationCenter?(center, didReceive: response)
+        targetOrBuffer(.response(response))?.didReceive(response)
+        await downstreamDelegate?.userNotificationCenter?(center, didReceive: response)
+    }
+}
+
+private enum PushDelegateCoordinator {
+    static let proxy = PushNotificationDelegate()
+
+    static func prepare(center: UNUserNotificationCenter = .current()) {
+        proxy.install(on: center)
+        EngageLogger.info("Push.Delegate", "launch delegate prepared")
+    }
+
+    static func attach(_ owner: Push, center: UNUserNotificationCenter) {
+        prepare(center: center)
+        proxy.attach(owner)
     }
 }
 
@@ -484,6 +538,15 @@ private func stableTokenHash(_ value: String) -> String {
 /// `EngageSDK` activates this module automatically. With a modular installation, call
 /// `EngageCore.start(config:)` first, then retain or use the value returned by `activate()`.
 public enum PushModule {
+    /// Installs a buffering notification delegate synchronously during application launch.
+    public static func prepareForLaunch() {
+        if Thread.isMainThread {
+            PushDelegateCoordinator.prepare()
+        } else {
+            DispatchQueue.main.sync { PushDelegateCoordinator.prepare() }
+        }
+    }
+
     @discardableResult
     public static func activate() -> Push {
         EngageLogger.debug("Push", "module activation requested")

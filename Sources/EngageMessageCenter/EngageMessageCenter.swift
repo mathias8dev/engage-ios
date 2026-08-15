@@ -54,12 +54,13 @@ public final class Inbox: @unchecked Sendable {
     fileprivate let enabled = EngageState(false)
     fileprivate let globalError = EngageState<InboxError?>(nil)
 
-    init(context: EngageModuleContext, store: InboxStore = InboxStore()) {
+    init(context: EngageModuleContext, store: InboxStore? = nil) {
         self.context = context
-        self.store = store
-        if !context.installationActive.value { try? store.wipe() }
+        let resolvedStore = store ?? InboxStore(directory: context.storageDirectory(module: "message-center"))
+        self.store = resolvedStore
+        if !context.installationActive.value { try? resolvedStore.wipe() }
         activeGeneration = context.generation.value
-        store.activate(activeGeneration)
+        resolvedStore.activate(activeGeneration)
         unreadCount = EngageState(0)
         EngageLogger.info(
             "MessageCenter.Inbox",
@@ -73,8 +74,11 @@ public final class Inbox: @unchecked Sendable {
         Task { for await _ in context.enabledFeatures.updates { runtimeChanged() } }
         Task { [weak self] in
             guard let self else { return }
-            for await _ in store.revision.updates {
-                EngageLogger.verbose("MessageCenter.Inbox", "store revision changed revision=\(store.revision.value)")
+            for await _ in self.store.revision.updates {
+                EngageLogger.verbose(
+                    "MessageCenter.Inbox",
+                    "store revision changed revision=\(self.store.revision.value)"
+                )
                 updateUnreadCount()
                 scheduleExpiry()
             }
@@ -265,7 +269,10 @@ public final class Inbox: @unchecked Sendable {
 
             do {
                 let results = try decodeMutationResults(response, batchId: batchId, expected: operations)
-                guard store.settle(ids: Set(results.map(\.operationId))) else {
+                let rejected = results.filter { $0.status == "REJECTED" }
+                let rejectedIds = Set(rejected.map(\.operationId))
+                let acceptedIds = Set(results.map(\.operationId)).subtracting(rejectedIds)
+                guard store.settle(accepted: acceptedIds, rejected: rejectedIds) else {
                     let failure = inboxError(
                         .localPersistence,
                         "Inbox mutation acknowledgement could not be persisted",
@@ -275,7 +282,6 @@ public final class Inbox: @unchecked Sendable {
                     scheduleMutationRetry()
                     return
                 }
-                let rejected = results.filter { $0.status == "REJECTED" }
                 EngageLogger.info(
                     "MessageCenter.Inbox",
                     "mutation batch settled batchId=\(batchId) results=\(results.count) rejected=\(rejected.count)"

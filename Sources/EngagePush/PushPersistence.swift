@@ -40,9 +40,14 @@ struct PushStoredState: Codable, Equatable, Sendable {
 final class PushPersistence: @unchecked Sendable {
     private let lock = NSLock()
     private let url: URL
+    private let removeItem: @Sendable (URL) throws -> Void
     private var stored: PushStoredState
 
-    init(directory: URL = pushStorageDirectory()) {
+    init(
+        directory: URL = pushStorageDirectory(),
+        removeItem: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    ) {
+        self.removeItem = removeItem
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         url = directory.appendingPathComponent("push-state.json")
         stored = (try? Data(contentsOf: url)).flatMap {
@@ -85,9 +90,9 @@ final class PushPersistence: @unchecked Sendable {
         EngageLogger.warning("Push.Storage", "state wipe started")
         lock.lock()
         defer { lock.unlock() }
-        stored = PushStoredState()
-        do { try FileManager.default.removeItem(at: url) }
+        do { try removeItem(url) }
         catch let error as CocoaError where error.code == .fileNoSuchFile { }
+        stored = PushStoredState()
         EngageLogger.warning("Push.Storage", "state wiped")
     }
 }

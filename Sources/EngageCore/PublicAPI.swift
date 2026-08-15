@@ -8,13 +8,16 @@ public enum EngageCore {
     public static func start(config: EngageConfig) {
         EngageLogger.configure(level: config.logLevel)
         EngageLogger.info("Core", "start requested endpointHost=\(config.endpoint.host ?? "unknown") sdkVersion=\(EngageSDKInfo.version)")
-        guard let created = storage.start(config: config) else {
+        switch storage.start(config: config) {
+        case let .started(created):
+            state.set(true)
+            EngageLogger.info("Core", "started")
+            Task { await created.start() }
+        case .alreadyStarted:
             EngageLogger.debug("Core", "start ignored reason=already_started")
-            return
+        case let .failed(error):
+            EngageLogger.error("Core", "start failed reason=storage_initialization", error: error)
         }
-        state.set(true)
-        EngageLogger.info("Core", "started")
-        Task { await created.start() }
     }
 
     static func requireRuntime() -> CoreRuntime {
@@ -52,6 +55,12 @@ public enum EngageCore {
 }
 
 private final class EngageGlobalStorage: @unchecked Sendable {
+    enum StartResult {
+        case started(CoreRuntime)
+        case alreadyStarted
+        case failed(Error)
+    }
+
     private let lock = NSLock()
     private var runtime: CoreRuntime?
     private var startedConfig: EngageConfig?
@@ -60,7 +69,7 @@ private final class EngageGlobalStorage: @unchecked Sendable {
     private var preferenceCenter: PreferenceCenter?
     private var modules: [String: EngageModuleRegistration] = [:]
 
-    func start(config: EngageConfig) -> CoreRuntime? {
+    func start(config: EngageConfig) -> StartResult {
         lock.lock(); defer { lock.unlock() }
         if let startedConfig {
             precondition(
@@ -68,16 +77,22 @@ private final class EngageGlobalStorage: @unchecked Sendable {
                 "Engage is already started with another App configuration"
             )
             EngageLogger.debug("Core", "equivalent configuration confirmed")
-            return nil
+            return .alreadyStarted
         }
-        let created = CoreRuntime(config: config, directory: engageStorageDirectory())
+        let directory: URL
+        do {
+            directory = try engageStorageDirectory(config: config)
+        } catch {
+            return .failed(error)
+        }
+        let created = CoreRuntime(config: config, directory: directory)
         runtime = created
         startedConfig = config
         events = Events(runtime: created)
         flags = FeatureFlags(runtime: created)
         preferenceCenter = PreferenceCenter(runtime: created)
         EngageLogger.debug("Core", "global services created")
-        return created
+        return .started(created)
     }
 
     func requireRuntime() -> CoreRuntime {
@@ -385,20 +400,23 @@ public final class Events: @unchecked Sendable {
             EngageLogger.debug("Core.Events", "screen ignored key=\(key) reason=privacy_or_features")
             return
         }
-        lock.lock()
-        guard currentScreen != key else {
-            lock.unlock()
+        let transition = withScreenLock { () -> (previous: String?, duration: TimeInterval?)? in
+            guard currentScreen != key else { return nil }
+            let now = ProcessInfo.processInfo.systemUptime
+            let duration = visibleSince.map { accumulated + max(0, now - $0) }
+            let previous = currentScreen
+            previousScreen = previous
+            currentScreen = key
+            visibleSince = runtime.foreground.value ? now : nil
+            accumulated = 0
+            return (previous, duration)
+        }
+        guard let transition else {
             EngageLogger.verbose("Core.Events", "screen ignored key=\(key) reason=already_current")
             return
         }
-        let now = ProcessInfo.processInfo.systemUptime
-        let duration = visibleSince.map { accumulated + max(0, now - $0) }
-        let previous = currentScreen
-        previousScreen = previous
-        currentScreen = key
-        visibleSince = runtime.foreground.value ? now : nil
-        accumulated = 0
-        lock.unlock()
+        let previous = transition.previous
+        let duration = transition.duration
         EngageLogger.info("Core.Events", "screen changed previous=\(previous ?? "none") current=\(key)")
         if features.contains(.inApp) { runtime.signals.emit(.screenViewed(key)) }
         guard features.contains(.analytics) else { return }
@@ -417,16 +435,22 @@ public final class Events: @unchecked Sendable {
             EngageLogger.debug("Core.Events", "screen clear ignored reason=privacy_or_features")
             return
         }
-        lock.lock()
-        guard let screen = currentScreen else {
-            lock.unlock()
+        let cleared = withScreenLock { () -> (screen: String, duration: TimeInterval)? in
+            guard let screen = currentScreen else { return nil }
+            let now = ProcessInfo.processInfo.systemUptime
+            let duration = accumulated + (visibleSince.map { max(0, now - $0) } ?? 0)
+            currentScreen = nil
+            previousScreen = nil
+            visibleSince = nil
+            accumulated = 0
+            return (screen, duration)
+        }
+        guard let cleared else {
             EngageLogger.verbose("Core.Events", "screen clear ignored reason=no_current_screen")
             return
         }
-        let now = ProcessInfo.processInfo.systemUptime
-        let duration = accumulated + (visibleSince.map { max(0, now - $0) } ?? 0)
-        currentScreen = nil; previousScreen = nil; visibleSince = nil; accumulated = 0
-        lock.unlock()
+        let screen = cleared.screen
+        let duration = cleared.duration
         EngageLogger.info("Core.Events", "screen cleared key=\(screen) durationMillis=\(Int64(floor(duration * 1000)))")
         if features.contains(.inApp) { runtime.signals.emit(.screenCleared) }
         if features.contains(.analytics) {
@@ -443,24 +467,36 @@ public final class Events: @unchecked Sendable {
     }
 
     private func pauseVisibility() {
-        lock.lock(); defer { lock.unlock() }
-        if let visibleSince {
-            accumulated += max(0, ProcessInfo.processInfo.systemUptime - visibleSince)
-            self.visibleSince = nil
-            EngageLogger.verbose("Core.Events", "screen visibility paused accumulatedSeconds=\(accumulated)")
+        withScreenLock {
+            if let visibleSince {
+                accumulated += max(0, ProcessInfo.processInfo.systemUptime - visibleSince)
+                self.visibleSince = nil
+                EngageLogger.verbose("Core.Events", "screen visibility paused accumulatedSeconds=\(accumulated)")
+            }
         }
     }
     private func resumeVisibility() {
-        lock.lock(); defer { lock.unlock() }
-        if currentScreen != nil && visibleSince == nil {
-            visibleSince = ProcessInfo.processInfo.systemUptime
-            EngageLogger.verbose("Core.Events", "screen visibility resumed")
+        withScreenLock {
+            if currentScreen != nil && visibleSince == nil {
+                visibleSince = ProcessInfo.processInfo.systemUptime
+                EngageLogger.verbose("Core.Events", "screen visibility resumed")
+            }
         }
     }
     private func resetScreen() {
-        lock.lock(); defer { lock.unlock() }
-        currentScreen = nil; previousScreen = nil; visibleSince = nil; accumulated = 0
-        EngageLogger.debug("Core.Events", "screen state reset")
+        withScreenLock {
+            currentScreen = nil
+            previousScreen = nil
+            visibleSince = nil
+            accumulated = 0
+            EngageLogger.debug("Core.Events", "screen state reset")
+        }
+    }
+
+    private func withScreenLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
     }
 }
 

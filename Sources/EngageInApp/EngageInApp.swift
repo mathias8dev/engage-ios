@@ -86,8 +86,11 @@ public final class InApp: @unchecked Sendable {
             "InApp",
             "initializing generation=\(context.generation.value) installationId=\(context.installationId.value ?? "none")"
         )
-        let history = InAppHistory(generation: { context.generation.value })
-        if !context.installationActive.value { history.clearAll() }
+        let history = InAppHistory(
+            generation: { context.generation.value },
+            directory: context.storageDirectory(module: "in-app")
+        )
+        if !context.installationActive.value { try? history.clearAll() }
         runtime = InAppRuntime(
             context: context,
             owner: self,
@@ -101,7 +104,7 @@ public final class InApp: @unchecked Sendable {
                 id: "engage-in-app",
                 features: [.inApp],
                 syncModules: [.inApp],
-                wipe: { [weak runtime] in await runtime?.wipe() }
+                wipe: { [weak runtime] in try await runtime?.wipe() }
             )
         )
         Task {
@@ -243,10 +246,10 @@ private actor InAppRuntime {
         EngageLogger.info("InApp.Runtime", "observers started count=\(observationTasks.count)")
     }
 
-    func wipe() async {
+    func wipe() async throws {
         EngageLogger.warning("InApp.Runtime", "wipe started")
         delayedEvaluation?.cancel()
-        history.clearAll()
+        try history.clearAll()
         documents = []
         enabled = false
         evaluator.resetContext()
@@ -342,7 +345,8 @@ private actor InAppRuntime {
 
     private func receive(_ signal: EngageSignal) async {
         if case .localDataWiped = signal {
-            await wipe()
+            do { try await wipe() }
+            catch { EngageLogger.error("InApp.Runtime", "wipe signal failed", error: error) }
             return
         }
         guard enabled else {

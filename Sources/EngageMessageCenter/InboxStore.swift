@@ -11,13 +11,13 @@ private struct StoredInbox: Codable {
     var renderings: [String: StoredRendering] = [:]
 }
 
-private struct StoredInboxWindow: Codable {
+struct StoredInboxWindow: Codable, Sendable {
     var entryIds: [String]
     var nextCursor: String?
     var hasMore: Bool
 }
 
-private struct StoredRendering: Codable {
+struct StoredRendering: Codable, Sendable {
     let renderer: String
     let revision: Int64
     let document: EngagePayload
@@ -30,6 +30,37 @@ struct InboxMutation: Codable, Sendable {
     let entryId: String?
     let occurredAt: String
     let wasUnread: Bool?
+    let rollbackEntry: InboxEntry?
+    let rollbackUnreadEntryIds: [String]?
+    let rollbackUnreadCount: Int?
+    let rollbackRendering: StoredRendering?
+    let rollbackWindows: [String: StoredInboxWindow]?
+
+    init(
+        operationId: String,
+        generation: Int64,
+        type: String,
+        entryId: String?,
+        occurredAt: String,
+        wasUnread: Bool?,
+        rollbackEntry: InboxEntry? = nil,
+        rollbackUnreadEntryIds: [String]? = nil,
+        rollbackUnreadCount: Int? = nil,
+        rollbackRendering: StoredRendering? = nil,
+        rollbackWindows: [String: StoredInboxWindow]? = nil
+    ) {
+        self.operationId = operationId
+        self.generation = generation
+        self.type = type
+        self.entryId = entryId
+        self.occurredAt = occurredAt
+        self.wasUnread = wasUnread
+        self.rollbackEntry = rollbackEntry
+        self.rollbackUnreadEntryIds = rollbackUnreadEntryIds
+        self.rollbackUnreadCount = rollbackUnreadCount
+        self.rollbackRendering = rollbackRendering
+        self.rollbackWindows = rollbackWindows
+    }
 }
 
 struct CachedInboxWindow: Sendable {
@@ -160,8 +191,23 @@ final class InboxStore: @unchecked Sendable {
         return mutate {
             guard stored.generation == mutation.generation,
                   !stored.mutations.contains(where: { $0.operationId == mutation.operationId }) else { return }
-            stored.mutations.append(mutation)
-            applyOptimistic(mutation)
+            let captured = InboxMutation(
+                operationId: mutation.operationId,
+                generation: mutation.generation,
+                type: mutation.type,
+                entryId: mutation.entryId,
+                occurredAt: mutation.occurredAt,
+                wasUnread: mutation.wasUnread,
+                rollbackEntry: mutation.entryId.flatMap { stored.entries[$0] },
+                rollbackUnreadEntryIds: mutation.type == "MARK_ALL_READ"
+                    ? stored.entries.values.filter { $0.readAt == nil }.map { $0.id.value }
+                    : nil,
+                rollbackUnreadCount: stored.unreadCount,
+                rollbackRendering: mutation.entryId.flatMap { stored.renderings[$0] },
+                rollbackWindows: mutation.type == "DELETE" ? stored.windows : nil
+            )
+            stored.mutations.append(captured)
+            applyOptimistic(captured)
         }
     }
 
@@ -175,6 +221,29 @@ final class InboxStore: @unchecked Sendable {
     func settle(ids: Set<String>) -> Bool {
         EngageLogger.debug("MessageCenter.Store", "mutations settling count=\(ids.count)")
         return mutate { stored.mutations.removeAll { ids.contains($0.operationId) } }
+    }
+
+    @discardableResult
+    func settle(accepted: Set<String>, rejected: Set<String>) -> Bool {
+        EngageLogger.debug(
+            "MessageCenter.Store",
+            "mutations settling accepted=\(accepted.count) rejected=\(rejected.count)"
+        )
+        return mutate {
+            let completed = accepted.union(rejected)
+            guard !rejected.isEmpty else {
+                stored.mutations.removeAll { completed.contains($0.operationId) }
+                return
+            }
+            let original = stored.mutations
+            original.reversed().forEach {
+                rollback($0, reportRejection: rejected.contains($0.operationId))
+            }
+            stored.mutations = original.filter { !completed.contains($0.operationId) }
+            original
+                .filter { !rejected.contains($0.operationId) }
+                .forEach { applyOptimistic($0) }
+        }
     }
 
     func contains(_ id: String) -> Bool { locked { stored.entries[id] != nil } }
@@ -251,6 +320,30 @@ final class InboxStore: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    private func rollback(_ mutation: InboxMutation, reportRejection: Bool) {
+        if reportRejection {
+            EngageLogger.warning(
+                "MessageCenter.Store",
+                "optimistic mutation rolling back operationId=\(mutation.operationId) type=\(mutation.type)"
+            )
+        }
+        switch mutation.type {
+        case "MARK_READ", "MARK_UNREAD":
+            if let entry = mutation.rollbackEntry { stored.entries[entry.id.value] = entry }
+        case "MARK_ALL_READ":
+            for id in mutation.rollbackUnreadEntryIds ?? [] {
+                if let entry = stored.entries[id] { stored.entries[id] = replace(entry, readAt: nil) }
+            }
+        case "DELETE":
+            if let entry = mutation.rollbackEntry { stored.entries[entry.id.value] = entry }
+            if let id = mutation.entryId { stored.renderings[id] = mutation.rollbackRendering }
+            if let windows = mutation.rollbackWindows { stored.windows = windows }
+        default:
+            break
+        }
+        if let unreadCount = mutation.rollbackUnreadCount { stored.unreadCount = unreadCount }
     }
 
     private func merge(remote: InboxEntry, pending: [InboxMutation]) -> InboxEntry {

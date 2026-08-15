@@ -46,6 +46,18 @@ import Network
         EngageCore.registerModule(registration, runtime: runtime)
     }
 
+    /// Returns an app-configuration-scoped directory for durable optional-module state.
+    public func storageDirectory(module: String) -> URL {
+        precondition(
+            module.range(of: "^[a-z][a-z0-9-]{0,63}$", options: .regularExpression) != nil,
+            "Engage module storage names must be lowercase product keys"
+        )
+        let directory = runtime.storageDirectory
+            .appendingPathComponent(module, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
     public func documents(_ module: SyncModule) -> EngageState<[RemoteDocument]> {
         EngageLogger.debug("Core.Module", "documents observed module=\(module)")
         let state = EngageState<[RemoteDocument]>([])
@@ -111,6 +123,7 @@ import Network
 
 actor CoreRuntime {
     nonisolated let config: EngageConfig
+    nonisolated let storageDirectory: URL
     nonisolated let installationId: EngageState<String?>
     nonisolated let generation: EngageState<Int64>
     nonisolated let privacy: EngageState<PrivacyState>
@@ -153,6 +166,7 @@ actor CoreRuntime {
 
     init(config: EngageConfig, directory: URL) {
         self.config = config
+        storageDirectory = directory
         let storage = CorePersistence(directory: directory)
         let initial = storage.initialState
         persistence = storage

@@ -3,6 +3,111 @@ import XCTest
 @_spi(Modules) import EngageCore
 
 final class EngageCoreTests: XCTestCase {
+    func testDifferentApplicationConfigurationsUseDifferentStorageScopes() {
+        let first = EngageConfig(
+            appKey: "eng_app_first",
+            endpoint: URL(string: "https://edge.example.test/v1/")!
+        )
+        let second = EngageConfig(
+            appKey: "eng_app_second",
+            endpoint: URL(string: "https://edge.example.test/v1/")!
+        )
+
+        XCTAssertNotEqual(engageStorageScope(config: first), engageStorageScope(config: second))
+        XCTAssertEqual(engageStorageScope(config: first), engageStorageScope(config: first))
+    }
+
+    func testLegacyStorageMigratesToOnlyOneScopeAndCannotResurrectAfterWipe() async throws {
+        let legacyRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: legacyRoot) }
+        let ownerDirectory = legacyRoot
+            .appendingPathComponent("applications", isDirectory: true)
+            .appendingPathComponent("owner", isDirectory: true)
+        let contenderDirectory = legacyRoot
+            .appendingPathComponent("applications", isDirectory: true)
+            .appendingPathComponent("contender", isDirectory: true)
+        let operation = SdkOperation(
+            operationId: "legacy-opt-out",
+            generation: 3,
+            type: "PRIVACY_STATE_SET",
+            occurredAt: "2026-08-06T12:00:00Z",
+            payload: ["state": .string("OPTED_OUT")]
+        )
+        let legacySession = InstallationSession(
+            installationId: "legacy-installation",
+            credential: "legacy-secret-credential",
+            revocationCredential: "legacy-secret-revocation",
+            recoveryToken: "legacy-secret-recovery",
+            generation: 3,
+            privacy: .optedOut,
+            pushSubscription: "OPTED_OUT",
+            serverTime: "2026-08-06T12:00:00Z"
+        )
+        let legacyState = LegacyStateFixture(
+            session: legacySession,
+            privacy: .optedOut,
+            outbox: [operation],
+            sync: .empty,
+            exposedOperationIds: [],
+            disabledFeatures: []
+        )
+        try JSONEncoder().encode(legacyState).write(
+            to: legacyRoot.appendingPathComponent("core-state.json")
+        )
+        try Data("legacy-history".utf8).write(
+            to: legacyRoot.appendingPathComponent("in-app-history.json")
+        )
+
+        try migrateLegacyStorage(from: legacyRoot, to: ownerDirectory, scope: "owner")
+
+        let migrated = CorePersistence(directory: ownerDirectory)
+        XCTAssertEqual(migrated.initialState.privacy, .optedOut)
+        XCTAssertEqual(migrated.initialState.session, legacySession)
+        let operations = await migrated.operations()
+        XCTAssertEqual(operations, [operation])
+        for stateURL in [
+            legacyRoot.appendingPathComponent("core-state.json"),
+            ownerDirectory.appendingPathComponent("core-state.json"),
+        ] {
+            let functionalState = try String(contentsOf: stateURL, encoding: .utf8)
+            XCTAssertFalse(functionalState.contains("legacy-secret-credential"))
+            XCTAssertFalse(functionalState.contains("legacy-secret-revocation"))
+            XCTAssertFalse(functionalState.contains("legacy-secret-recovery"))
+        }
+        XCTAssertEqual(
+            try Data(contentsOf: ownerDirectory.appendingPathComponent("in-app/in-app-history.json")),
+            Data("legacy-history".utf8)
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: ownerDirectory.appendingPathComponent(".legacy-keychain-owner-v2").path
+            )
+        )
+
+        try FileManager.default.removeItem(at: ownerDirectory.appendingPathComponent("core-state.json"))
+        try FileManager.default.removeItem(
+            at: ownerDirectory.appendingPathComponent("in-app/in-app-history.json")
+        )
+        try migrateLegacyStorage(from: legacyRoot, to: ownerDirectory, scope: "owner")
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: ownerDirectory.appendingPathComponent("core-state.json").path
+            )
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: ownerDirectory.appendingPathComponent("in-app/in-app-history.json").path
+            )
+        )
+
+        try migrateLegacyStorage(from: legacyRoot, to: contenderDirectory, scope: "contender")
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: contenderDirectory.appendingPathComponent("core-state.json").path
+            )
+        )
+    }
+
     func testJSONValueRoundTripsWithoutFlatteningTypes() throws {
         let value: JSONValue = .object([
             "title": .string("Order ready"),
@@ -229,4 +334,13 @@ final class EngageCoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: value, withIntermediateDirectories: true)
         return value
     }
+}
+
+private struct LegacyStateFixture: Encodable {
+    let session: InstallationSession?
+    let privacy: PrivacyState
+    let outbox: [SdkOperation]
+    let sync: SyncSnapshot
+    let exposedOperationIds: Set<String>
+    let disabledFeatures: Set<SdkFeature>
 }

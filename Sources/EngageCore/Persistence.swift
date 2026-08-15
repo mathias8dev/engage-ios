@@ -142,7 +142,13 @@ actor CorePersistence {
         EngageLogger.debug("Core.Storage", "persistence loading directory=\(directory.lastPathComponent)")
         stateURL = directory.appendingPathComponent("core-state.json")
         legacyRevocationURL = directory.appendingPathComponent("privacy-revocation.json")
-        secureStore = SecureBlobStore(directory: directory)
+        secureStore = SecureBlobStore(
+            directory: directory,
+            service: "io.engage.sdk.credentials.\(directory.lastPathComponent)",
+            legacyService: FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent(legacyKeychainOwnerMarker).path
+            ) ? "io.engage.sdk.credentials" : nil
+        )
 
         let decoder = JSONDecoder()
         let existingData = try? Data(contentsOf: stateURL)
@@ -241,8 +247,20 @@ actor CorePersistence {
                 "pendingRevocations=\(loadedControl?.revocations.count ?? 0)"
         )
 
-        // Rewrites legacy state without credentials after a successful migration.
-        if mayRewriteFunctionalState { try? Self.persist(loadedState, to: stateURL) }
+        // Rewrites migrated state without credentials. Keep the legacy file privacy-compatible
+        // for a downgrade, but remove any credentials that older SDK versions stored in plaintext.
+        if mayRewriteFunctionalState {
+            do {
+                try Self.persist(loadedState, to: stateURL)
+                if let legacyStateURL = legacyCoreStateURL(for: directory) {
+                    var safeLegacyState = loadedState
+                    safeLegacyState.session = nil
+                    try Self.persist(safeLegacyState, to: legacyStateURL)
+                }
+            } catch {
+                EngageLogger.error("Core.Storage", "legacy functional state rewrite failed", error: error)
+            }
+        }
         if migratedLegacyRevocation { try? FileManager.default.removeItem(at: legacyRevocationURL) }
     }
 
@@ -509,9 +527,22 @@ private enum SecureAccount: String { case session, privacyControl = "privacy-con
 /// Keychain-backed on Apple platforms. The file fallback only exists so the package can be tested on Linux.
 private final class SecureBlobStore: @unchecked Sendable {
     private let directory: URL
-    private let service = "io.engage.sdk.credentials"
+    private let service: String
+    private let legacyService: String?
 
-    init(directory: URL) { self.directory = directory }
+    init(
+        directory: URL,
+        service: String = "io.engage.sdk.credentials",
+        legacyService: String? = nil
+    ) {
+        self.directory = directory
+        self.service = service
+        #if canImport(Security)
+        self.legacyService = legacyService == service ? nil : legacyService
+        #else
+        self.legacyService = nil
+        #endif
+    }
 
     func read<T: Decodable>(_ type: T.Type, account: SecureAccount) -> T? {
         guard let data = readData(account: account) else {
@@ -529,24 +560,38 @@ private final class SecureBlobStore: @unchecked Sendable {
     func write<T: Encodable>(_ value: T, account: SecureAccount) throws {
         let data = try JSONEncoder().encode(value)
         EngageLogger.debug("Core.SecureStore", "write account=\(account.rawValue) bytes=\(data.count)")
-        try writeData(data, account: account)
+        try writeData(data, account: account, service: service)
+        if let legacyService { try deleteData(account: account, service: legacyService) }
     }
 
     func delete(account: SecureAccount) throws {
         EngageLogger.debug("Core.SecureStore", "delete account=\(account.rawValue)")
-        #if canImport(Security)
-        let status = SecItemDelete(query(account: account) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw SecureStoreError(status: status)
-        }
-        #else
-        try? FileManager.default.removeItem(at: fallbackURL(account))
-        #endif
+        try deleteData(account: account, service: service)
+        if let legacyService { try deleteData(account: account, service: legacyService) }
     }
 
     private func readData(account: SecureAccount) -> Data? {
+        if let data = readData(account: account, service: service) { return data }
+        guard let legacyService,
+              let legacyData = readData(account: account, service: legacyService) else { return nil }
+        do {
+            try writeData(legacyData, account: account, service: service)
+            try deleteData(account: account, service: legacyService)
+            EngageLogger.info("Core.SecureStore", "legacy account migrated account=\(account.rawValue)")
+        } catch {
+            // Continue using the legacy value for this launch, but retain it so migration can retry.
+            EngageLogger.error(
+                "Core.SecureStore",
+                "legacy account migration deferred account=\(account.rawValue)",
+                error: error
+            )
+        }
+        return legacyData
+    }
+
+    private func readData(account: SecureAccount, service: String) -> Data? {
         #if canImport(Security)
-        var request = query(account: account)
+        var request = query(account: account, service: service)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -557,9 +602,9 @@ private final class SecureBlobStore: @unchecked Sendable {
         #endif
     }
 
-    private func writeData(_ data: Data, account: SecureAccount) throws {
+    private func writeData(_ data: Data, account: SecureAccount, service: String) throws {
         #if canImport(Security)
-        let selector = query(account: account)
+        let selector = query(account: account, service: service)
         let updateStatus = SecItemUpdate(
             selector as CFDictionary,
             [kSecValueData as String: data] as CFDictionary
@@ -576,8 +621,23 @@ private final class SecureBlobStore: @unchecked Sendable {
         #endif
     }
 
+    private func deleteData(account: SecureAccount, service: String) throws {
+        #if canImport(Security)
+        let status = SecItemDelete(query(account: account, service: service) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SecureStoreError(status: status)
+        }
+        #else
+        do {
+            try FileManager.default.removeItem(at: fallbackURL(account))
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            return
+        }
+        #endif
+    }
+
     #if canImport(Security)
-    private func query(account: SecureAccount) -> [String: Any] {
+    private func query(account: SecureAccount, service: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -595,11 +655,147 @@ private final class SecureBlobStore: @unchecked Sendable {
 private struct SecureStoreError: Error { let status: OSStatus }
 #endif
 
-func engageStorageDirectory() -> URL {
+private let legacyStorageMigrationLock = NSLock()
+private let legacyKeychainOwnerMarker = ".legacy-keychain-owner-v2"
+
+private struct LegacyStorageMigrationRecord: Codable {
+    let ownerScope: String
+    var completedItems: Set<String>
+}
+
+private struct LegacyStorageItem {
+    let identifier: String
+    let source: String
+    let destination: String
+}
+
+private enum LegacyStorageMigrationError: Error {
+    case invalidRecord
+}
+
+/// Claims the pre-isolation storage for the first app configuration and migrates every item once.
+/// Completed-item markers deliberately survive functional wipes so legacy data cannot reappear.
+func migrateLegacyStorage(from legacyRoot: URL, to scopedDirectory: URL, scope: String) throws {
+    legacyStorageMigrationLock.lock()
+    defer { legacyStorageMigrationLock.unlock() }
+
+    let manager = FileManager.default
+    try manager.createDirectory(at: legacyRoot, withIntermediateDirectories: true)
+    try manager.createDirectory(at: scopedDirectory, withIntermediateDirectories: true)
+    let recordURL = legacyRoot.appendingPathComponent(".storage-migration-v2.json")
+    var record: LegacyStorageMigrationRecord
+    if manager.fileExists(atPath: recordURL.path) {
+        let data = try Data(contentsOf: recordURL)
+        guard let decoded = try? JSONDecoder().decode(LegacyStorageMigrationRecord.self, from: data) else {
+            throw LegacyStorageMigrationError.invalidRecord
+        }
+        record = decoded
+    } else {
+        record = LegacyStorageMigrationRecord(ownerScope: scope, completedItems: [])
+        try persistLegacyStorageMigration(record, to: recordURL)
+    }
+
+    guard record.ownerScope == scope else { return }
+    let items = [
+        LegacyStorageItem(identifier: "core-state", source: "core-state.json", destination: "core-state.json"),
+        LegacyStorageItem(
+            identifier: "privacy-revocation",
+            source: "privacy-revocation.json",
+            destination: "privacy-revocation.json"
+        ),
+        LegacyStorageItem(
+            identifier: "secure-session-fallback",
+            source: "secure-session.json",
+            destination: "secure-session.json"
+        ),
+        LegacyStorageItem(
+            identifier: "secure-privacy-fallback",
+            source: "secure-privacy-control.json",
+            destination: "secure-privacy-control.json"
+        ),
+        LegacyStorageItem(
+            identifier: "secure-revocation-fallback",
+            source: "secure-revocation.json",
+            destination: "secure-revocation.json"
+        ),
+        LegacyStorageItem(
+            identifier: "in-app-history",
+            source: "in-app-history.json",
+            destination: "in-app/in-app-history.json"
+        ),
+        LegacyStorageItem(
+            identifier: "message-center-inbox",
+            source: "inbox.json",
+            destination: "message-center/inbox.json"
+        ),
+        LegacyStorageItem(
+            identifier: "push-state",
+            source: "push-state.json",
+            destination: "push/push-state.json"
+        ),
+    ]
+
+    for item in items where !record.completedItems.contains(item.identifier) {
+        let source = legacyRoot.appendingPathComponent(item.source)
+        let destination = scopedDirectory.appendingPathComponent(item.destination)
+        if manager.fileExists(atPath: source.path), !manager.fileExists(atPath: destination.path) {
+            try manager.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try manager.copyItem(at: source, to: destination)
+        }
+        record.completedItems.insert(item.identifier)
+        try persistLegacyStorageMigration(record, to: recordURL)
+    }
+
+    let ownerMarker = scopedDirectory.appendingPathComponent(legacyKeychainOwnerMarker)
+    try Data(scope.utf8).write(to: ownerMarker, options: [.atomic])
+}
+
+private func persistLegacyStorageMigration(_ record: LegacyStorageMigrationRecord, to url: URL) throws {
+    try JSONEncoder().encode(record).write(to: url, options: [.atomic])
+}
+
+private func legacyCoreStateURL(for scopedDirectory: URL) -> URL? {
+    guard FileManager.default.fileExists(
+        atPath: scopedDirectory.appendingPathComponent(legacyKeychainOwnerMarker).path
+    ) else { return nil }
+    let applicationsDirectory = scopedDirectory.deletingLastPathComponent()
+    guard applicationsDirectory.lastPathComponent == "applications" else { return nil }
+    let legacyURL = applicationsDirectory
+        .deletingLastPathComponent()
+        .appendingPathComponent("core-state.json")
+    return FileManager.default.fileExists(atPath: legacyURL.path) ? legacyURL : nil
+}
+
+func engageStorageDirectory(config: EngageConfig) throws -> URL {
     let manager = FileManager.default
     let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         ?? manager.temporaryDirectory
-    let directory = base.appendingPathComponent("io.engage.sdk", isDirectory: true)
-    try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+    let legacyRoot = base.appendingPathComponent("io.engage.sdk", isDirectory: true)
+    let directory = legacyRoot
+        .appendingPathComponent("applications", isDirectory: true)
+        .appendingPathComponent(engageStorageScope(config: config), isDirectory: true)
+    try migrateLegacyStorage(
+        from: legacyRoot,
+        to: directory,
+        scope: engageStorageScope(config: config)
+    )
     return directory
+}
+
+func engageStorageScope(config: EngageConfig) -> String {
+    var hash: UInt64 = 0xcbf29ce484222325
+    "\(config.endpoint.absoluteString)\u{0}\(config.appKey)".utf8.forEach {
+        hash = (hash ^ UInt64($0)) &* 0x100000001b3
+    }
+    return String(hash, radix: 16).leftPadding(toLength: 16, withPad: "0")
+}
+
+private extension String {
+    func leftPadding(toLength: Int, withPad pad: Character) -> String {
+        guard count < toLength else { return self }
+        return String(repeating: String(pad), count: toLength - count) + self
+    }
 }

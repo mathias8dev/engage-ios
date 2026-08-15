@@ -47,6 +47,23 @@ final class PushPersistenceTests: XCTestCase {
         XCTAssertEqual(PushPersistence(directory: directory).value, PushStoredState())
     }
 
+    func testWipeFailureDoesNotClaimThatMemoryWasCleared() throws {
+        enum ExpectedFailure: Error { case disk }
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = PushPersistence(
+            directory: directory,
+            removeItem: { _ in throw ExpectedFailure.disk }
+        )
+        try persistence.edit { $0.subscription = "OPTED_OUT"; $0.token = "token" }
+
+        XCTAssertThrowsError(try persistence.wipe())
+
+        XCTAssertEqual(persistence.value.subscription, "OPTED_OUT")
+        XCTAssertEqual(persistence.value.token, "token")
+        XCTAssertEqual(PushPersistence(directory: directory).value.subscription, "OPTED_OUT")
+    }
+
     private func temporaryDirectory() throws -> URL {
         let value = FileManager.default.temporaryDirectory
             .appendingPathComponent("engage-push-tests-\(UUID().uuidString)", isDirectory: true)

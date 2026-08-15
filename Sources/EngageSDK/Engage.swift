@@ -14,6 +14,10 @@ public enum Engage {
     public static func start(config: EngageConfig) {
         EngageLogger.info("SDK", "facade start requested")
         EngageCore.start(config: config)
+        guard EngageCore.state.value else {
+            EngageLogger.error("SDK", "facade module activation skipped reason=core_start_failed")
+            return
+        }
         modules.activate()
         EngageLogger.info("SDK", "facade modules activated")
     }

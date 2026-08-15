@@ -263,6 +263,7 @@ public final class EngageInAppContentView: UIView {
     private var contentReady = false
     private var renderFailureReported = false
     private var visibleReported = false
+    private let appearanceVariables = DivVariableStorage()
 
     public convenience init(content: InAppContent, owner: InApp) {
         self.init(content: content, owner: owner, onDismissRequested: nil, onRenderFailed: nil)
@@ -307,6 +308,7 @@ public final class EngageInAppContentView: UIView {
 
     public override func didMoveToWindow() {
         super.didMoveToWindow()
+        updateDivKitAppearanceVariable()
         EngageLogger.verbose("InApp.Render", "content window changed messageId=\(content.messageId) attached=\(window != nil)")
         DispatchQueue.main.async { [weak self] in self?.reportVisibilityIfNeeded() }
     }
@@ -314,6 +316,12 @@ public final class EngageInAppContentView: UIView {
     public override func layoutSubviews() {
         super.layoutSubviews()
         reportVisibilityIfNeeded()
+    }
+
+    public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else { return }
+        updateDivKitAppearanceVariable()
     }
 
     public override var intrinsicContentSize: CGSize {
@@ -350,9 +358,10 @@ public final class EngageInAppContentView: UIView {
     private func divView() throws -> UIView {
         EngageLogger.debug("InApp.Render", "DivKit scene parsing messageId=\(content.messageId)")
         let data = try JSONEncoder().encode(JSONValue.object(content.payload))
+        updateDivKitAppearanceVariable()
         let components = DivKitComponents(urlHandler: DivUrlHandlerDelegate { [weak self] url in
             self?.handle(url)
-        })
+        }, variablesStorage: DivVariablesStorage(outerStorage: appearanceVariables))
         let view = DivView(divKitComponents: components)
         divSizeObserver = view.addObserver { [weak self] _ in
             Task { @MainActor [weak self] in self?.contentSizeDidChange() }
@@ -371,6 +380,13 @@ public final class EngageInAppContentView: UIView {
             EngageLogger.debug("InApp.Render", "DivKit scene bound messageId=\(content.messageId)")
         }
         return view
+    }
+
+    private func updateDivKitAppearanceVariable() {
+        appearanceVariables.put(
+            name: DivVariableName(rawValue: engageAppearanceVariableName),
+            value: .string(divKitAppearanceValue(for: traitCollection.userInterfaceStyle).rawValue)
+        )
     }
 
     private func imageView() throws -> UIView {
@@ -513,6 +529,17 @@ public final class EngageInAppContentView: UIView {
         EngageLogger.info("InApp.Render", "visibility threshold reached messageId=\(content.messageId)")
         owner.recordVisible(content)
     }
+}
+
+private let engageAppearanceVariableName = "engage_appearance"
+
+private enum EngageDivKitAppearanceValue: String {
+    case systemLight = "system_light"
+    case systemDark = "system_dark"
+}
+
+private func divKitAppearanceValue(for style: UIUserInterfaceStyle) -> EngageDivKitAppearanceValue {
+    style == .dark ? .systemDark : .systemLight
 }
 
 extension EngageInAppContentView: WKNavigationDelegate {

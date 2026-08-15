@@ -331,11 +331,19 @@ extension InboxEntry: Identifiable {}
 private struct DivKitSnapshotView: UIViewRepresentable {
     let snapshot: InboxRenderingSnapshot
     let messageCenter: MessageCenter
+
+    final class Coordinator {
+        let appearanceVariables = DivVariableStorage()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> DivView {
         EngageLogger.debug(
             "MessageCenter.DivKit",
             "view creating entryId=\(snapshot.entryId) revision=\(snapshot.revision) renderer=\(snapshot.renderer)"
         )
+        updateAppearance(context.coordinator.appearanceVariables, colorScheme: context.environment.colorScheme)
         let components = DivKitComponents(urlHandler: DivUrlHandlerDelegate { url in
             EngageLogger.info(
                 "MessageCenter.DivKit",
@@ -346,12 +354,22 @@ private struct DivKitSnapshotView: UIViewRepresentable {
                 UIApplication.shared.open(url); return
             }
             Task { _ = await messageCenter.executeAction(name, arguments: actionArguments(url)) }
-        })
+        }, variablesStorage: DivVariablesStorage(outerStorage: context.coordinator.appearanceVariables))
         let view = DivView(divKitComponents: components)
         update(view)
         return view
     }
-    func updateUIView(_ uiView: DivView, context: Context) { update(uiView) }
+    func updateUIView(_ uiView: DivView, context: Context) {
+        updateAppearance(context.coordinator.appearanceVariables, colorScheme: context.environment.colorScheme)
+        update(uiView)
+    }
+
+    private func updateAppearance(_ storage: DivVariableStorage, colorScheme: ColorScheme) {
+        storage.put(
+            name: DivVariableName(rawValue: messageCenterAppearanceVariableName),
+            value: .string(messageCenterDivKitAppearanceValue(for: colorScheme).rawValue)
+        )
+    }
     private func update(_ view: DivView) {
         guard let data = try? JSONEncoder().encode(JSONValue.object(snapshot.document)) else {
             EngageLogger.error("MessageCenter.DivKit", "document encoding failed entryId=\(snapshot.entryId)")
@@ -366,6 +384,17 @@ private struct DivKitSnapshotView: UIViewRepresentable {
             EngageLogger.debug("MessageCenter.DivKit", "source updated entryId=\(snapshot.entryId)")
         }
     }
+}
+
+private let messageCenterAppearanceVariableName = "engage_appearance"
+
+private enum MessageCenterDivKitAppearanceValue: String {
+    case systemLight = "system_light"
+    case systemDark = "system_dark"
+}
+
+private func messageCenterDivKitAppearanceValue(for colorScheme: ColorScheme) -> MessageCenterDivKitAppearanceValue {
+    colorScheme == .dark ? .systemDark : .systemLight
 }
 
 private func actionArguments(_ url: URL) -> EngagePayload {

@@ -54,6 +54,119 @@ final class EngageMessageCenterTests: XCTestCase {
         XCTAssertEqual(reloaded.pending(generation: 3).map(\.operationId), ["read-1"])
     }
 
+    func testRejectedMutationRollsBackBeforeItLeavesTheDurableQueue() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(3))
+        XCTAssertTrue(store.savePage(
+            generation: 3,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "message-1")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1
+        ))
+        XCTAssertTrue(store.enqueue(InboxMutation(
+            operationId: "read-rejected",
+            generation: 3,
+            type: "MARK_READ",
+            entryId: "message-1",
+            occurredAt: "2026-08-06T12:00:00Z",
+            wasUnread: true
+        )))
+        XCTAssertNotNil(store.entry("message-1")?.readAt)
+
+        XCTAssertTrue(store.settle(accepted: [], rejected: ["read-rejected"]))
+
+        XCTAssertNil(store.entry("message-1")?.readAt)
+        XCTAssertEqual(store.unreadCount, 1)
+        let reloaded = InboxStore(directory: directory)
+        XCTAssertNil(reloaded.entry("message-1")?.readAt)
+        XCTAssertTrue(reloaded.pending(generation: 3).isEmpty)
+    }
+
+    func testRejectedDeleteRestoresEntryWindowAndRendering() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(4))
+        XCTAssertTrue(store.savePage(
+            generation: 4,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "message-1")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1
+        ))
+        XCTAssertTrue(store.saveRenderings([
+            InboxRenderingSnapshot(
+                entryId: InboxEntryId("message-1"),
+                renderer: "DIVKIT",
+                revision: 2,
+                document: ["card": .string("cached")]
+            ),
+        ]))
+        XCTAssertTrue(store.enqueue(InboxMutation(
+            operationId: "delete-rejected",
+            generation: 4,
+            type: "DELETE",
+            entryId: "message-1",
+            occurredAt: "2026-08-06T12:00:00Z",
+            wasUnread: true
+        )))
+        XCTAssertNil(store.entry("message-1"))
+
+        XCTAssertTrue(store.settle(accepted: [], rejected: ["delete-rejected"]))
+
+        XCTAssertNotNil(store.entry("message-1"))
+        XCTAssertEqual(store.cachedWindow(pageSize: 20).entryIds, ["message-1"])
+        XCTAssertEqual(store.cachedRenderings([InboxEntryId("message-1")]).first?.revision, 2)
+    }
+
+    func testRejectedMutationDoesNotUndoALaterAcceptedMutation() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(5))
+        XCTAssertTrue(store.savePage(
+            generation: 5,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "message-1")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1
+        ))
+        XCTAssertTrue(store.enqueue(InboxMutation(
+            operationId: "read-rejected",
+            generation: 5,
+            type: "MARK_READ",
+            entryId: "message-1",
+            occurredAt: "2026-08-06T12:00:00Z",
+            wasUnread: true
+        )))
+        XCTAssertTrue(store.enqueue(InboxMutation(
+            operationId: "delete-accepted",
+            generation: 5,
+            type: "DELETE",
+            entryId: "message-1",
+            occurredAt: "2026-08-06T12:00:01Z",
+            wasUnread: false
+        )))
+
+        XCTAssertTrue(store.settle(
+            accepted: ["delete-accepted"],
+            rejected: ["read-rejected"]
+        ))
+
+        XCTAssertNil(store.entry("message-1"))
+        XCTAssertEqual(store.unreadCount, 0)
+        XCTAssertTrue(store.pending(generation: 5).isEmpty)
+    }
+
     func testCachedWindowAndRenderingSurviveRestartButGenerationDoesNotLeak() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

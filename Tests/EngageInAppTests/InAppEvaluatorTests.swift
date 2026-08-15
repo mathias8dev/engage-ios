@@ -4,6 +4,38 @@ import EngageCore
 @testable import EngageInApp
 
 final class InAppEvaluatorTests: XCTestCase {
+    func testWipeIsDurableBeforeReturning() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("engage-inapp-wipe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = InAppHistory(generation: { 1 }, directory: directory)
+        history.recordImpression("campaign", at: Date(timeIntervalSince1970: 1_800_000_000))
+
+        try history.clearAll()
+
+        let reloaded = InAppHistory(generation: { 1 }, directory: directory)
+        XCTAssertEqual(reloaded.history("campaign").total, 0)
+    }
+
+    func testWipePropagatesDeletionFailureWithoutClaimingMemoryWasCleared() throws {
+        enum ExpectedFailure: Error { case disk }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("engage-inapp-wipe-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = InAppHistory(
+            generation: { 1 },
+            directory: directory,
+            removeItem: { _ in throw ExpectedFailure.disk }
+        )
+        history.recordImpression("campaign", at: Date(timeIntervalSince1970: 1_800_000_000))
+
+        XCTAssertThrowsError(try history.clearAll())
+
+        XCTAssertEqual(history.history("campaign").total, 1)
+    }
+
     func testStandaloneModuleExposesPublicActivation() {
         let activate: () -> InApp = InAppModule.activate
         let shared: () -> InApp = { InAppModule.shared }
