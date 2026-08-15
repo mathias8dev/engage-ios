@@ -13,6 +13,11 @@ public enum Engage {
 
     public static func start(config: EngageConfig) {
         EngageLogger.info("SDK", "facade start requested")
+        #if canImport(UIKit)
+        // Install the buffering delegate before starting asynchronous module work. This lets the
+        // SDK retain notification responses delivered during a cold application launch.
+        PushModule.prepareForLaunch()
+        #endif
         EngageCore.start(config: config)
         guard EngageCore.state.value else {
             EngageLogger.error("SDK", "facade module activation skipped reason=core_start_failed")

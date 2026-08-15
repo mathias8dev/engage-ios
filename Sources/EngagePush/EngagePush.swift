@@ -65,7 +65,7 @@ public final class Push: @unchecked Sendable {
             await installDelegate()
             let categories = await center.notificationCategories()
                 .union(context.config.push.notificationCategories)
-            await center.setNotificationCategories(categories)
+            center.setNotificationCategories(categories)
             EngageLogger.debug("Push", "notification categories registered count=\(categories.count)")
             await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
             EngageLogger.info("Push", "APNs registration requested")
@@ -458,20 +458,31 @@ private final class PushNotificationDelegate: NSObject, UNUserNotificationCenter
     }
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
         EngageLogger.verbose("Push.Delegate", "willPresent forwarding")
         let engage = targetOrBuffer(.notification(notification))?.willPresent(notification) ?? []
-        let app = await downstreamDelegate?.userNotificationCenter?(center, willPresent: notification) ?? []
-        return engage.union(app)
+        let forwarded: Void? = downstreamDelegate?.userNotificationCenter?(
+            center,
+            willPresent: notification,
+            withCompletionHandler: { app in completionHandler(engage.union(app)) }
+        )
+        if forwarded == nil { completionHandler(engage) }
     }
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse
-    ) async {
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         EngageLogger.verbose("Push.Delegate", "didReceive forwarding actionIdentifier=\(response.actionIdentifier)")
         targetOrBuffer(.response(response))?.didReceive(response)
-        await downstreamDelegate?.userNotificationCenter?(center, didReceive: response)
+        let forwarded: Void? = downstreamDelegate?.userNotificationCenter?(
+            center,
+            didReceive: response,
+            withCompletionHandler: completionHandler
+        )
+        if forwarded == nil { completionHandler() }
     }
 }
 
