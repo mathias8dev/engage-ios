@@ -138,7 +138,7 @@ public struct EngageMessageCenterView: View {
             MessageCenterEmptyView(
                 symbol: "exclamationmark.bubble",
                 title: "Messages unavailable",
-                body: "We couldn't refresh your messages. Try again.",
+                message: "We couldn't refresh your messages. Try again.",
                 action: "Retry",
                 onAction: { Task { await pager.refresh() } }
             )
@@ -146,7 +146,7 @@ public struct EngageMessageCenterView: View {
             MessageCenterEmptyView(
                 symbol: "bubble.left.and.bubble.right",
                 title: "You're all caught up",
-                body: "Important updates and messages will appear here.",
+                message: "Important updates and messages will appear here.",
                 action: "Refresh",
                 onAction: { Task { await pager.refresh() } }
             )
@@ -154,7 +154,7 @@ public struct EngageMessageCenterView: View {
             MessageCenterEmptyView(
                 symbol: "checkmark.message",
                 title: "No unread messages",
-                body: "Everything in your inbox has been read.",
+                message: "Everything in your inbox has been read.",
                 action: "Refresh",
                 onAction: { Task { await pager.refresh() } }
             )
@@ -289,7 +289,7 @@ private struct MessageCenterCard: View {
 private struct MessageCenterEmptyView: View {
     let symbol: String
     let title: String
-    let body: String
+    let message: String
     let action: String
     let onAction: () -> Void
 
@@ -305,7 +305,7 @@ private struct MessageCenterEmptyView: View {
                 .font(.title3.weight(.bold))
                 .foregroundStyle(.primary)
                 .padding(.top, 24)
-            Text(body)
+            Text(message)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

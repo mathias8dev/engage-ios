@@ -351,7 +351,7 @@ actor CoreRuntime {
                 sdkVersion: EngageSDKInfo.version,
                 appVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
                 appBuild: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
-                deviceModel: Self.deviceModel(),
+                deviceModel: await Self.deviceModel(),
                 osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                 recoveryToken: await persistence.recoveryToken()
             )
@@ -914,7 +914,7 @@ actor CoreRuntime {
     static func keyPattern(_ value: String) -> Bool {
         value.range(of: "^[a-z][a-z0-9_.-]{0,127}$", options: .regularExpression) != nil
     }
-    static func deviceModel() -> String? {
+    @MainActor static func deviceModel() -> String? {
         #if canImport(UIKit)
         UIDevice.current.model
         #else

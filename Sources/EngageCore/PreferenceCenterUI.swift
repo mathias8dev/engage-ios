@@ -55,7 +55,7 @@ private final class PreferenceCenterViewController: UITableViewController {
         )
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "preference")
         apply(snapshot.value)
-        observation = Task { [weak self] in
+        observation = Task { [weak self, snapshot = self.snapshot] in
             for await value in snapshot.updates {
                 guard !Task.isCancelled else { return }
                 await MainActor.run { self?.apply(value) }
