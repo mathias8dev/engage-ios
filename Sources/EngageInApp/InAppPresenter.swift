@@ -63,7 +63,11 @@ import EngageCore
         presented.close(track: reportDismissal)
     }
 
-    private func topViewController(_ root: UIViewController? = activeWindow()?.rootViewController) -> UIViewController? {
+    private func topViewController() -> UIViewController? {
+        topViewController(activeWindow()?.rootViewController)
+    }
+
+    private func topViewController(_ root: UIViewController?) -> UIViewController? {
         if let presented = root?.presentedViewController { return topViewController(presented) }
         if let navigation = root as? UINavigationController { return topViewController(navigation.visibleViewController) }
         if let tabs = root as? UITabBarController { return topViewController(tabs.selectedViewController) }
