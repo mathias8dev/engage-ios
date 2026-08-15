@@ -360,7 +360,8 @@ public final class EngageInAppContentView: UIView {
     }
 
     private func divView() throws -> UIView {
-        EngageLogger.debug("InApp.Render", "DivKit scene parsing messageId=\(content.messageId)")
+        let messageId = content.messageId
+        EngageLogger.debug("InApp.Render", "DivKit scene parsing messageId=\(messageId)")
         let data = try JSONEncoder().encode(JSONValue.object(content.payload))
         updateDivKitAppearanceVariable()
         let components = DivKitComponents(urlHandler: DivUrlHandlerDelegate { [weak self] url in
@@ -373,15 +374,15 @@ public final class EngageInAppContentView: UIView {
         Task { [weak self, weak view] in
             guard let view else { return }
             await view.setSource(
-                DivViewSource(kind: .data(data), cardId: DivCardID(rawValue: content.messageId))
+                DivViewSource(kind: .data(data), cardId: DivCardID(rawValue: messageId))
             )
             guard view.cardSize != nil else {
-                EngageLogger.warning("InApp.Render", "DivKit scene rejected messageId=\(content.messageId)")
+                EngageLogger.warning("InApp.Render", "DivKit scene rejected messageId=\(messageId)")
                 self?.reportRenderFailure()
                 return
             }
             self?.markContentReady()
-            EngageLogger.debug("InApp.Render", "DivKit scene bound messageId=\(content.messageId)")
+            EngageLogger.debug("InApp.Render", "DivKit scene bound messageId=\(messageId)")
         }
         return view
     }
@@ -596,7 +597,7 @@ public struct EngageInAppPlacement: UIViewRepresentable {
 
     public func makeUIView(context: Context) -> EngageInAppPlacementView {
         EngageLogger.debug("InApp.Placement", "SwiftUI placement view creating key=\(key)")
-        EngageInAppPlacementView(key: key, inApp: inApp)
+        return EngageInAppPlacementView(key: key, inApp: inApp)
     }
     public func updateUIView(_ uiView: EngageInAppPlacementView, context: Context) {}
 }
@@ -619,32 +620,32 @@ public final class EngageInAppPlacementView: UIView {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     guard let self else { return }
-                    if bounds.height > 0 { reservedHeight = bounds.height }
-                    subviews.forEach { $0.removeFromSuperview() }
+                    if self.bounds.height > 0 { self.reservedHeight = self.bounds.height }
+                    self.subviews.forEach { $0.removeFromSuperview() }
                     guard let content else {
                         EngageLogger.verbose(
                             "InApp.Placement",
-                            "placement empty reservedHeight=\(reservedHeight) policy=\(emptyState)"
+                            "placement empty reservedHeight=\(self.reservedHeight) policy=\(self.emptyState)"
                         )
-                        isHidden = emptyState == .collapse
-                        invalidateIntrinsicContentSize()
+                        self.isHidden = self.emptyState == .collapse
+                        self.invalidateIntrinsicContentSize()
                         return
                     }
                     if case let .embedded(presentation) = content.presentation {
-                        emptyState = presentation.emptyState
+                        self.emptyState = presentation.emptyState
                     }
-                    isHidden = false
+                    self.isHidden = false
                     EngageLogger.info("InApp.Placement", "placement rendering messageId=\(content.messageId)")
                     let view = EngageInAppContentView(content: content, owner: owner)
-                    addSubview(view)
+                    self.addSubview(view)
                     view.translatesAutoresizingMaskIntoConstraints = false
                     NSLayoutConstraint.activate([
-                        view.leadingAnchor.constraint(equalTo: leadingAnchor),
-                        view.trailingAnchor.constraint(equalTo: trailingAnchor),
-                        view.topAnchor.constraint(equalTo: topAnchor),
-                        view.bottomAnchor.constraint(equalTo: bottomAnchor),
+                        view.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+                        view.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+                        view.topAnchor.constraint(equalTo: self.topAnchor),
+                        view.bottomAnchor.constraint(equalTo: self.bottomAnchor),
                     ])
-                    invalidateIntrinsicContentSize()
+                    self.invalidateIntrinsicContentSize()
                 }
             }
         }
@@ -721,7 +722,7 @@ private extension InAppContent {
     var overlayPosition: OverlayPosition? { overlay?.position }
     var backdrop: BackdropPolicy? { overlay?.backdrop }
     var dismissal: DismissalPolicy? { overlay?.dismissal }
-    var animation: InAppAnimation? { overlay?.animation }
+    var animation: InAppAnimation { overlay?.animation ?? .none }
     var autoDismissSeconds: Int? { overlay?.autoDismissAfterSeconds }
 }
 #else
