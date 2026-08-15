@@ -132,8 +132,9 @@ private final class MockURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        let capturedRequest = Self.materializingBody(in: request)
         Self.lock.lock()
-        Self.capturedRequest = request
+        Self.capturedRequest = capturedRequest
         let status = Self.responseStatus
         let body = Self.responseBody
         Self.lock.unlock()
@@ -149,4 +150,23 @@ private final class MockURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private static func materializingBody(in request: URLRequest) -> URLRequest {
+        guard request.httpBody == nil, let stream = request.httpBodyStream else { return request }
+        stream.open()
+        defer { stream.close() }
+
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(contentsOf: buffer.prefix(count))
+        }
+
+        var materialized = request
+        materialized.httpBodyStream = nil
+        materialized.httpBody = body
+        return materialized
+    }
 }

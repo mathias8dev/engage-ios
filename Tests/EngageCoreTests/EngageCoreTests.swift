@@ -60,7 +60,7 @@ final class EngageCoreTests: XCTestCase {
 
         try migrateLegacyStorage(from: legacyRoot, to: ownerDirectory, scope: "owner")
 
-        let migrated = CorePersistence(directory: ownerDirectory)
+        let migrated = testPersistence(at: ownerDirectory)
         XCTAssertEqual(migrated.initialState.privacy, .optedOut)
         XCTAssertEqual(migrated.initialState.session, legacySession)
         let operations = await migrated.operations()
@@ -144,7 +144,7 @@ final class EngageCoreTests: XCTestCase {
     func testSessionCredentialsAreNotWrittenToFunctionalState() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = CorePersistence(directory: directory)
+        let persistence = testPersistence(at: directory)
         let session = InstallationSession(
             installationId: "installation-1",
             credential: "secret-credential",
@@ -165,13 +165,13 @@ final class EngageCoreTests: XCTestCase {
         XCTAssertFalse(functionalState.contains("secret-credential"))
         XCTAssertFalse(functionalState.contains("secret-revocation"))
         XCTAssertFalse(functionalState.contains("secret-recovery"))
-        XCTAssertEqual(CorePersistence(directory: directory).initialState.session, session)
+        XCTAssertEqual(testPersistence(at: directory).initialState.session, session)
     }
 
     func testOptOutAndServerOperationSurviveTheSameAtomicPersistenceBoundary() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = CorePersistence(directory: directory)
+        let persistence = testPersistence(at: directory)
         let operation = SdkOperation(
             operationId: "privacy-operation",
             generation: 7,
@@ -182,7 +182,7 @@ final class EngageCoreTests: XCTestCase {
 
         try await persistence.recordOptOut(operation)
 
-        let reloaded = CorePersistence(directory: directory)
+        let reloaded = testPersistence(at: directory)
         XCTAssertEqual(reloaded.initialState.privacy, .optedOut)
         XCTAssertTrue(reloaded.initialState.installationEnabled)
         let operations = await reloaded.operations()
@@ -192,19 +192,19 @@ final class EngageCoreTests: XCTestCase {
     func testWipeRemainsSuspendedAcrossRestartUntilExplicitResume() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = CorePersistence(directory: directory)
+        let persistence = testPersistence(at: directory)
 
         try await persistence.wipeFunctionalState()
-        XCTAssertFalse(CorePersistence(directory: directory).initialState.installationEnabled)
+        XCTAssertFalse(testPersistence(at: directory).initialState.installationEnabled)
 
         try await persistence.resumeAfterWipe()
-        XCTAssertTrue(CorePersistence(directory: directory).initialState.installationEnabled)
+        XCTAssertTrue(testPersistence(at: directory).initialState.installationEnabled)
     }
 
     func testPrivacyBoundarySurvivesCrashBeforeFunctionalWipe() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = CorePersistence(directory: directory)
+        let persistence = testPersistence(at: directory)
         let session = InstallationSession(
             installationId: "installation-before-wipe",
             credential: "credential",
@@ -221,7 +221,7 @@ final class EngageCoreTests: XCTestCase {
         // Simulate a process death immediately after the durable privacy boundary.
         try await persistence.beginWipe(revocation: envelope)
 
-        let reloaded = CorePersistence(directory: directory)
+        let reloaded = testPersistence(at: directory)
         XCTAssertEqual(reloaded.initialState.privacy, .optedOut)
         XCTAssertFalse(reloaded.initialState.installationEnabled)
         XCTAssertNil(reloaded.initialState.session)
@@ -229,7 +229,7 @@ final class EngageCoreTests: XCTestCase {
         XCTAssertEqual(pending, envelope)
 
         try await reloaded.clearRevocation(operationId: envelope.operationId)
-        let afterAcknowledgement = CorePersistence(directory: directory)
+        let afterAcknowledgement = testPersistence(at: directory)
         XCTAssertEqual(afterAcknowledgement.initialState.privacy, .optedOut)
         XCTAssertFalse(afterAcknowledgement.initialState.installationEnabled)
         let cleared = await afterAcknowledgement.pendingRevocation()
@@ -239,7 +239,7 @@ final class EngageCoreTests: XCTestCase {
     func testASecondWipeDoesNotReplaceAnOlderPendingRevocation() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = CorePersistence(directory: directory)
+        let persistence = testPersistence(at: directory)
         let first = RevocationEnvelope(operationId: "revoke-first", credential: "credential-first")
         let second = RevocationEnvelope(operationId: "revoke-second", credential: "credential-second")
 
@@ -257,7 +257,7 @@ final class EngageCoreTests: XCTestCase {
     func testOptInAfterWipePersistsReactivationAndServerOperationAtomically() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = CorePersistence(directory: directory)
+        let persistence = testPersistence(at: directory)
         try await persistence.wipeFunctionalState()
         let operation = SdkOperation(
             operationId: "privacy-opt-in",
@@ -269,7 +269,7 @@ final class EngageCoreTests: XCTestCase {
 
         try await persistence.recordOptIn(operation)
 
-        let reloaded = CorePersistence(directory: directory)
+        let reloaded = testPersistence(at: directory)
         XCTAssertEqual(reloaded.initialState.privacy, .optedIn)
         XCTAssertTrue(reloaded.initialState.installationEnabled)
         let operations = await reloaded.operations()
@@ -303,7 +303,7 @@ final class EngageCoreTests: XCTestCase {
     func testEditingCoreFeaturesDoesNotDisableAModuleInstalledLater() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = CorePersistence(directory: directory)
+        let persistence = testPersistence(at: directory)
         try await persistence.recordOptOut(SdkOperation(
             operationId: "keep-runtime-offline",
             generation: 0,
@@ -333,6 +333,10 @@ final class EngageCoreTests: XCTestCase {
             .appendingPathComponent("engage-core-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: value, withIntermediateDirectories: true)
         return value
+    }
+
+    private func testPersistence(at directory: URL) -> CorePersistence {
+        CorePersistence(directory: directory, secureStorageBackend: .fileSystem)
     }
 }
 

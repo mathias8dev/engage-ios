@@ -138,7 +138,7 @@ actor CorePersistence {
     private var sessionSecrets: SessionSecrets?
     private var privacyControl: PrivacyControl?
 
-    init(directory: URL) {
+    init(directory: URL, secureStorageBackend: SecureStorageBackend = .platform) {
         EngageLogger.debug("Core.Storage", "persistence loading directory=\(directory.lastPathComponent)")
         stateURL = directory.appendingPathComponent("core-state.json")
         legacyRevocationURL = directory.appendingPathComponent("privacy-revocation.json")
@@ -147,7 +147,8 @@ actor CorePersistence {
             service: "io.engage.sdk.credentials.\(directory.lastPathComponent)",
             legacyService: FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent(legacyKeychainOwnerMarker).path
-            ) ? "io.engage.sdk.credentials" : nil
+            ) ? "io.engage.sdk.credentials" : nil,
+            backend: secureStorageBackend
         )
 
         let decoder = JSONDecoder()
@@ -524,21 +525,34 @@ actor CorePersistence {
 
 private enum SecureAccount: String { case session, privacyControl = "privacy-control", revocation }
 
+/// The platform store is always used by the SDK. The file-backed option provides deterministic,
+/// isolated storage to package tests whose host process has no Keychain entitlement.
+enum SecureStorageBackend: Sendable {
+    case platform
+    case fileSystem
+}
+
 /// Keychain-backed on Apple platforms. The file fallback only exists so the package can be tested on Linux.
 private final class SecureBlobStore: @unchecked Sendable {
     private let directory: URL
     private let service: String
     private let legacyService: String?
+    private let backend: SecureStorageBackend
 
     init(
         directory: URL,
         service: String = "io.engage.sdk.credentials",
-        legacyService: String? = nil
+        legacyService: String? = nil,
+        backend: SecureStorageBackend = .platform
     ) {
         self.directory = directory
         self.service = service
+        self.backend = backend
         #if canImport(Security)
-        self.legacyService = legacyService == service ? nil : legacyService
+        self.legacyService = switch backend {
+        case .platform: legacyService == service ? nil : legacyService
+        case .fileSystem: nil
+        }
         #else
         self.legacyService = nil
         #endif
@@ -591,49 +605,54 @@ private final class SecureBlobStore: @unchecked Sendable {
 
     private func readData(account: SecureAccount, service: String) -> Data? {
         #if canImport(Security)
-        var request = query(account: account, service: service)
-        request[kSecReturnData as String] = true
-        request[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
-        #else
-        return try? Data(contentsOf: fallbackURL(account))
+        if backend == .platform {
+            var request = query(account: account, service: service)
+            request[kSecReturnData as String] = true
+            request[kSecMatchLimit as String] = kSecMatchLimitOne
+            var result: CFTypeRef?
+            guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess else { return nil }
+            return result as? Data
+        }
         #endif
+        return try? Data(contentsOf: fallbackURL(account))
     }
 
     private func writeData(_ data: Data, account: SecureAccount, service: String) throws {
         #if canImport(Security)
-        let selector = query(account: account, service: service)
-        let updateStatus = SecItemUpdate(
-            selector as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else { throw SecureStoreError(status: updateStatus) }
-        var insertion = selector
-        insertion[kSecValueData as String] = data
-        insertion[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let addStatus = SecItemAdd(insertion as CFDictionary, nil)
-        guard addStatus == errSecSuccess else { throw SecureStoreError(status: addStatus) }
-        #else
-        try data.write(to: fallbackURL(account), options: [.atomic])
+        if backend == .platform {
+            let selector = query(account: account, service: service)
+            let updateStatus = SecItemUpdate(
+                selector as CFDictionary,
+                [kSecValueData as String: data] as CFDictionary
+            )
+            if updateStatus == errSecSuccess { return }
+            guard updateStatus == errSecItemNotFound else { throw SecureStoreError(status: updateStatus) }
+            var insertion = selector
+            insertion[kSecValueData as String] = data
+            insertion[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            let addStatus = SecItemAdd(insertion as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw SecureStoreError(status: addStatus) }
+            return
+        }
         #endif
+        try data.write(to: fallbackURL(account), options: [.atomic])
     }
 
     private func deleteData(account: SecureAccount, service: String) throws {
         #if canImport(Security)
-        let status = SecItemDelete(query(account: account, service: service) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw SecureStoreError(status: status)
+        if backend == .platform {
+            let status = SecItemDelete(query(account: account, service: service) as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw SecureStoreError(status: status)
+            }
+            return
         }
-        #else
+        #endif
         do {
             try FileManager.default.removeItem(at: fallbackURL(account))
         } catch let error as CocoaError where error.code == .fileNoSuchFile {
             return
         }
-        #endif
     }
 
     #if canImport(Security)
