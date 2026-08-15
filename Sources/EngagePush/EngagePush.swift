@@ -378,7 +378,7 @@ public final class Push: @unchecked Sendable {
 
     private func openWebURL(_ payload: PushPayload) {
         guard let url = payload.webURL else {
-            EngageLogger.warn(
+            EngageLogger.warning(
                 "Push",
                 "web URL ignored deliveryId=\(payload.deliveryId) reason=invalid_destination"
             )
@@ -390,7 +390,7 @@ public final class Push: @unchecked Sendable {
                 if opened {
                     EngageLogger.info("Push", "web URL opened deliveryId=\(deliveryId) host=\(url.host ?? "none")")
                 } else {
-                    EngageLogger.warn("Push", "web URL open failed deliveryId=\(deliveryId) reason=no_handler")
+                    EngageLogger.warning("Push", "web URL open failed deliveryId=\(deliveryId) reason=no_handler")
                 }
             }
         }
