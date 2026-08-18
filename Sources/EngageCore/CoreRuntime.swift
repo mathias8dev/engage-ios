@@ -167,10 +167,18 @@ actor CoreRuntime {
     private var networkMonitor: EngageNetworkMonitor?
     #endif
 
-    init(config: EngageConfig, directory: URL, urlSession: URLSession = .shared) {
+    init(
+        config: EngageConfig,
+        directory: URL,
+        urlSession: URLSession = .shared,
+        secureStorageBackend: SecureStorageBackend = .platform
+    ) {
         self.config = config
         storageDirectory = directory
-        let storage = CorePersistence(directory: directory)
+        let storage = CorePersistence(
+            directory: directory,
+            secureStorageBackend: secureStorageBackend
+        )
         let initial = storage.initialState
         persistence = storage
         client = MobileEdgeClient(endpoint: config.endpoint, appKey: config.appKey, session: urlSession)

@@ -48,8 +48,14 @@ final class DirectDetailRenderingRegressionTests: XCTestCase {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [DirectDetailURLProtocol.self]
         let session = URLSession(configuration: sessionConfiguration)
-        let runtime = CoreRuntime(config: config, directory: directory, urlSession: session)
+        let runtime = CoreRuntime(
+            config: config,
+            directory: directory,
+            urlSession: session,
+            secureStorageBackend: .fileSystem
+        )
         let context = EngageModuleContext(runtime: runtime, config: config)
+        XCTAssertEqual(context.installationId.value, "installation-1")
         context.enabledFeatures.set([.messageCenter])
         let messageCenter = MessageCenter(context: context)
 
@@ -102,8 +108,14 @@ final class DirectDetailRenderingRegressionTests: XCTestCase {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [DirectDetailURLProtocol.self]
         let session = URLSession(configuration: sessionConfiguration)
-        let runtime = CoreRuntime(config: config, directory: directory, urlSession: session)
+        let runtime = CoreRuntime(
+            config: config,
+            directory: directory,
+            urlSession: session,
+            secureStorageBackend: .fileSystem
+        )
         let context = EngageModuleContext(runtime: runtime, config: config)
+        XCTAssertEqual(context.installationId.value, "installation-1")
         let messageCenter = MessageCenter(context: context)
 
         // Registering the module makes the feature available. Explicitly disable it and
@@ -212,7 +224,7 @@ private final class DirectDetailURLProtocol: URLProtocol {
         let body: Data
         if isInboxPage {
             body = Self.inboxResponseBody
-        } else if path.hasSuffix("/v1/sdk/installation") {
+        } else if path.hasSuffix("/v1/sdk/installations") {
             body = Self.installationResponse
         } else if path.hasSuffix("/v1/sdk/sync") {
             body = Self.syncResponse
