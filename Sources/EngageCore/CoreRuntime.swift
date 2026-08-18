@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -164,13 +167,13 @@ actor CoreRuntime {
     private var networkMonitor: EngageNetworkMonitor?
     #endif
 
-    init(config: EngageConfig, directory: URL) {
+    init(config: EngageConfig, directory: URL, urlSession: URLSession = .shared) {
         self.config = config
         storageDirectory = directory
         let storage = CorePersistence(directory: directory)
         let initial = storage.initialState
         persistence = storage
-        client = MobileEdgeClient(endpoint: config.endpoint, appKey: config.appKey)
+        client = MobileEdgeClient(endpoint: config.endpoint, appKey: config.appKey, session: urlSession)
         session = initial.session
         disabledFeatures = initial.disabledFeatures
         installationEnabled = initial.installationEnabled

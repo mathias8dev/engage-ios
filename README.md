@@ -216,12 +216,31 @@ The complete product exports a ready-to-use SwiftUI inbox:
 import EngageSDK
 
 EngageMessageCenterView(messageCenter: Engage.messageCenter)
+Engage.messageCenter.display()
+Engage.messageCenter.display(entryId: entry.id)
 ```
 
 The ready-made view renders each template's compact `SUMMARY` surface in the list. Selecting the row
-pushes a native SwiftUI detail screen, marks the entry read and renders the `DETAIL` surface. Both
+pushes a native SwiftUI detail screen and renders the `DETAIL` surface. The entry becomes read only
+after that detail is visible. Both
 surfaces are immutable snapshots produced from the same headless payload and published template
 revision; navigation chrome remains native.
+
+Applications that own their navigation can embed the reusable views directly:
+
+```swift
+EngageMessageCenterListView(
+    onEntryTap: { entry in router.openMessage(entry.id) }
+)
+
+EngageMessageCenterDetailView(
+    entryId: entry.id,
+    onUnavailable: { router.closeMissingMessage() }
+)
+```
+
+These views contain no navigation controller or toolbar and share the same Inbox store, rendering
+cache, DivKit runtime, and action registry as the ready-made presentation.
 
 For a custom UI, consume `Engage.messageCenter.inbox.unreadCount`, create an `InboxPager`, and call
 the inbox mutation methods directly. Rendering documents remain separate from inbox metadata so a

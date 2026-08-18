@@ -59,6 +59,7 @@ let package = Package(
         .testTarget(name: "EngageSDKTests", dependencies: ["EngageSDK"]),
         .testTarget(name: "EngageInAppTests", dependencies: ["EngageInApp"]),
         .testTarget(name: "EngageMessageCenterTests", dependencies: ["EngageMessageCenter"]),
+        .testTarget(name: "EngageMessageCenterDivKitTests", dependencies: ["EngageMessageCenterDivKit"]),
         .testTarget(name: "EngagePushTests", dependencies: ["EngagePush"]),
     ]
 )

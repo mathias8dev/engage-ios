@@ -21,6 +21,7 @@ struct StoredRendering: Codable, Sendable {
     let renderer: InboxRenderer
     let revision: Int64
     let surfaces: [InboxRenderingSurface: EngagePayload]
+    let expiresAt: Date?
 }
 
 struct InboxMutation: Codable, Sendable {
@@ -90,6 +91,14 @@ final class InboxStore: @unchecked Sendable {
 
     var generation: Int64 { locked { stored.generation } }
     var unreadCount: Int { locked { stored.unreadCount } }
+    var pendingDeletedEntryIds: Set<InboxEntryId> { locked {
+        Set(stored.mutations.compactMap { mutation in
+            guard mutation.generation == stored.generation,
+                  mutation.type == "DELETE",
+                  let entryId = mutation.entryId else { return nil }
+            return InboxEntryId(entryId)
+        })
+    } }
 
     func entries(ids: [String]? = nil, now: Date = Date()) -> [InboxEntry] {
         let values: [InboxEntry] = locked {
@@ -130,8 +139,8 @@ final class InboxStore: @unchecked Sendable {
             "page saving generation=\(generation) pageSize=\(pageSize) hasCursor=\(cursor != nil) " +
                 "entries=\(entries.count) hasMore=\(hasMore) unread=\(unreadCount)"
         )
-        return mutate {
-            guard stored.generation == generation else { return }
+        return mutateIf {
+            guard stored.generation == generation else { return false }
             entries.forEach { remote in
                 if stored.mutations.contains(where: {
                     $0.type == "DELETE" && $0.entryId == remote.id.value
@@ -161,6 +170,7 @@ final class InboxStore: @unchecked Sendable {
                 stored.windows[key] = window
             }
             purgeExpiredLocked(now: Date())
+            return true
         }
     }
 
@@ -188,9 +198,9 @@ final class InboxStore: @unchecked Sendable {
             "mutation persisting operationId=\(mutation.operationId) generation=\(mutation.generation) " +
                 "type=\(mutation.type) entryId=\(mutation.entryId ?? "none")"
         )
-        return mutate {
+        return mutateIf {
             guard stored.generation == mutation.generation,
-                  !stored.mutations.contains(where: { $0.operationId == mutation.operationId }) else { return }
+                  !stored.mutations.contains(where: { $0.operationId == mutation.operationId }) else { return false }
             let captured = InboxMutation(
                 operationId: mutation.operationId,
                 generation: mutation.generation,
@@ -208,6 +218,7 @@ final class InboxStore: @unchecked Sendable {
             )
             stored.mutations.append(captured)
             applyOptimistic(captured)
+            return true
         }
     }
 
@@ -250,6 +261,13 @@ final class InboxStore: @unchecked Sendable {
     func entry(_ id: String) -> InboxEntry? { locked { stored.entries[id] } }
 
     func cachedRenderings(_ ids: [InboxEntryId]) -> [InboxRenderingSnapshot] {
+        let now = Date()
+        let hasExpiredRendering = locked {
+            stored.renderings.values.contains { $0.expiresAt.map { $0 <= now } ?? false }
+        }
+        if hasExpiredRendering {
+            mutate { purgeExpiredLocked(now: now) }
+        }
         let values: [InboxRenderingSnapshot] = locked {
             ids.compactMap { id -> InboxRenderingSnapshot? in
                 guard let value = stored.renderings[id.value] else { return nil }
@@ -257,7 +275,8 @@ final class InboxStore: @unchecked Sendable {
                     entryId: id,
                     renderer: value.renderer,
                     revision: value.revision,
-                    surfaces: value.surfaces
+                    surfaces: value.surfaces,
+                    expiresAt: value.expiresAt
                 )
             }
         }
@@ -266,20 +285,22 @@ final class InboxStore: @unchecked Sendable {
     }
 
     @discardableResult
-    func saveRenderings(_ values: [InboxRenderingSnapshot]) -> Bool {
+    func saveRenderings(_ values: [InboxRenderingSnapshot], generation: Int64) -> Bool {
         EngageLogger.debug("MessageCenter.Store", "renderings saving count=\(values.count)")
-        return mutate {
+        return mutateIf {
+            guard stored.generation == generation else { return false }
             for value in values {
-                guard stored.entries[value.entryId.value] != nil else { continue }
                 let current = stored.renderings[value.entryId.value]
                 if current == nil || current!.revision <= value.revision {
                     stored.renderings[value.entryId.value] = StoredRendering(
                         renderer: value.renderer,
                         revision: value.revision,
-                        surfaces: value.surfaces
+                        surfaces: value.surfaces,
+                        expiresAt: value.expiresAt
                     )
                 }
             }
+            return true
         }
     }
 
@@ -378,13 +399,24 @@ final class InboxStore: @unchecked Sendable {
         let expired = Set(stored.entries.values.compactMap { entry in
             entry.expiresAt.map { $0 <= now ? entry.id.value : nil } ?? nil
         })
-        guard !expired.isEmpty else { return }
-        EngageLogger.info("MessageCenter.Store", "expired entries purging count=\(expired.count)")
-        for id in expired {
-            if stored.entries[id]?.readAt == nil { stored.unreadCount = max(0, stored.unreadCount - 1) }
-            stored.entries[id] = nil
-            stored.renderings[id] = nil
+        if !expired.isEmpty {
+            EngageLogger.info("MessageCenter.Store", "expired entries purging count=\(expired.count)")
+            for id in expired {
+                if stored.entries[id]?.readAt == nil { stored.unreadCount = max(0, stored.unreadCount - 1) }
+                stored.entries[id] = nil
+                stored.renderings[id] = nil
+            }
         }
+        let expiredRenderings = stored.renderings.compactMap { id, rendering in
+            rendering.expiresAt.map { $0 <= now ? id : nil } ?? nil
+        }
+        if !expiredRenderings.isEmpty {
+            EngageLogger.info(
+                "MessageCenter.Store",
+                "expired direct renderings purging count=\(expiredRenderings.count)"
+            )
+        }
+        expiredRenderings.forEach { stored.renderings[$0] = nil }
         stored.windows = stored.windows.mapValues { window in
             var value = window
             value.entryIds.removeAll { expired.contains($0) }
@@ -408,6 +440,33 @@ final class InboxStore: @unchecked Sendable {
         lock.lock()
         let previous = stored
         operation()
+        do {
+            try persist()
+        } catch {
+            stored = previous
+            lock.unlock()
+            EngageLogger.error("MessageCenter.Store", "mutation persistence failed", error: error)
+            return false
+        }
+        let next = revision.value + 1
+        lock.unlock()
+        revision.set(next)
+        EngageLogger.verbose(
+            "MessageCenter.Store",
+            "mutation persisted revision=\(next) generation=\(stored.generation) entries=\(stored.entries.count) " +
+                "unread=\(stored.unreadCount) pending=\(stored.mutations.count)"
+        )
+        return true
+    }
+
+    @discardableResult
+    private func mutateIf(_ operation: () -> Bool) -> Bool {
+        lock.lock()
+        let previous = stored
+        guard operation() else {
+            lock.unlock()
+            return false
+        }
         do {
             try persist()
         } catch {
