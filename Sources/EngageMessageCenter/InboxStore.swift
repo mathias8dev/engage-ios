@@ -18,9 +18,9 @@ struct StoredInboxWindow: Codable, Sendable {
 }
 
 struct StoredRendering: Codable, Sendable {
-    let renderer: String
+    let renderer: InboxRenderer
     let revision: Int64
-    let document: EngagePayload
+    let surfaces: [InboxRenderingSurface: EngagePayload]
 }
 
 struct InboxMutation: Codable, Sendable {
@@ -257,7 +257,7 @@ final class InboxStore: @unchecked Sendable {
                     entryId: id,
                     renderer: value.renderer,
                     revision: value.revision,
-                    document: value.document
+                    surfaces: value.surfaces
                 )
             }
         }
@@ -276,7 +276,7 @@ final class InboxStore: @unchecked Sendable {
                     stored.renderings[value.entryId.value] = StoredRendering(
                         renderer: value.renderer,
                         revision: value.revision,
-                        document: value.document
+                        surfaces: value.surfaces
                     )
                 }
             }

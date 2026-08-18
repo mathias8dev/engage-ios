@@ -104,9 +104,9 @@ final class EngageMessageCenterTests: XCTestCase {
         XCTAssertTrue(store.saveRenderings([
             InboxRenderingSnapshot(
                 entryId: InboxEntryId("message-1"),
-                renderer: "DIVKIT",
+                renderer: .divKit,
                 revision: 2,
-                document: ["card": .string("cached")]
+                surfaces: renderingSurfaces()
             ),
         ]))
         XCTAssertTrue(store.enqueue(InboxMutation(
@@ -184,15 +184,18 @@ final class EngageMessageCenterTests: XCTestCase {
         XCTAssertTrue(store.saveRenderings([
             InboxRenderingSnapshot(
                 entryId: InboxEntryId("a"),
-                renderer: "DIVKIT",
+                renderer: .divKit,
                 revision: 11,
-                document: ["card": .string("cached")]
+                surfaces: renderingSurfaces()
             ),
         ]))
 
         let reloaded = InboxStore(directory: directory)
         XCTAssertEqual(reloaded.cachedWindow(pageSize: 2).entryIds, ["a", "b"])
-        XCTAssertEqual(reloaded.cachedRenderings([InboxEntryId("a")]).first?.revision, 11)
+        let restoredRendering = reloaded.cachedRenderings([InboxEntryId("a")]).first
+        XCTAssertEqual(restoredRendering?.revision, 11)
+        XCTAssertEqual(restoredRendering?.surfaces[.summary]?.string("card"), "summary")
+        XCTAssertEqual(restoredRendering?.surfaces[.detail]?.string("card"), "detail")
 
         XCTAssertTrue(reloaded.activate(9))
         XCTAssertTrue(reloaded.entries().isEmpty)
@@ -220,6 +223,13 @@ final class EngageMessageCenterTests: XCTestCase {
             expiresAt: nil,
             readAt: readAt
         )
+    }
+
+    private func renderingSurfaces() -> [InboxRenderingSurface: EngagePayload] {
+        [
+            .summary: ["card": .string("summary")],
+            .detail: ["card": .string("detail")],
+        ]
     }
 
     private func temporaryDirectory() throws -> URL {

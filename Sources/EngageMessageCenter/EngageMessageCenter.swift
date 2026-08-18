@@ -339,14 +339,19 @@ public final class Inbox: @unchecked Sendable {
         let values = try raw.map { value -> InboxRenderingSnapshot in
             guard let item = value.objectValue,
                   let id = item.string("entryId"),
-                  let renderer = item.string("renderer"),
+                  let rendererValue = item.string("renderer"),
+                  let renderer = InboxRenderer(rawValue: rendererValue),
                   let revision = item.integer("revision"),
-                  let document = item.object("document") else { throw invalidResponse() }
+                  let rawSurfaces = item.object("surfaces") else { throw invalidResponse() }
+            let surfaces = try Dictionary(uniqueKeysWithValues: InboxRenderingSurface.allCases.map { surface in
+                guard let document = rawSurfaces.object(surface.rawValue) else { throw invalidResponse() }
+                return (surface, document)
+            })
             return InboxRenderingSnapshot(
                 entryId: InboxEntryId(id),
                 renderer: renderer,
                 revision: revision,
-                document: document
+                surfaces: surfaces
             )
         }
         let returned = values.map(\.entryId)

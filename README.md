@@ -218,6 +218,11 @@ import EngageSDK
 EngageMessageCenterView(messageCenter: Engage.messageCenter)
 ```
 
+The ready-made view renders each template's compact `SUMMARY` surface in the list. Selecting the row
+pushes a native SwiftUI detail screen, marks the entry read and renders the `DETAIL` surface. Both
+surfaces are immutable snapshots produced from the same headless payload and published template
+revision; navigation chrome remains native.
+
 For a custom UI, consume `Engage.messageCenter.inbox.unreadCount`, create an `InboxPager`, and call
 the inbox mutation methods directly. Rendering documents remain separate from inbox metadata so a
 custom list does not need to understand the DivKit payload until a message is opened.

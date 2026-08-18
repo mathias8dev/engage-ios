@@ -357,7 +357,9 @@ private actor InAppRuntime {
         switch signal {
         case .appOpened: signalType = "appOpened"; evaluator.onSignal(.appOpened)
         case .appBackgrounded: signalType = "appBackgrounded"; evaluator.onSignal(.appBackgrounded)
-        case let .event(name, _): signalType = "event:\(name)"; evaluator.onSignal(.event(name))
+        case let .event(name, properties):
+            signalType = "event:\(name)"
+            evaluator.onSignal(.event(name, properties))
         case let .screenViewed(key): signalType = "screen:\(key)"; evaluator.onSignal(.screenViewed(key))
         case .screenCleared: signalType = "screenCleared"; evaluator.onSignal(.screenCleared)
         case .networkAvailable: signalType = "networkAvailable"

@@ -90,6 +90,49 @@ final class InAppEvaluatorTests: XCTestCase {
         XCTAssertFalse(fixture.evaluator.remainsContextuallyEligible(selected))
     }
 
+    func testTriggerEventPropertiesOverrideAuthoredPersonalizationDefaultsAtDisplayTime() throws {
+        let fixture = try Fixture(seed: "seed", experienceId: "purchase-message")
+        let trigger = InAppTrigger(
+            id: "purchase",
+            type: .event,
+            delaySeconds: 0,
+            screenName: nil,
+            eventName: "purchase",
+            minimumSessions: nil,
+            versionConstraint: nil
+        )
+        let variant = fixture.variant(payload: [
+            "text": .object(["$engageValue": .string("event.amount")]),
+            "currency": .object(["$engageValue": .string("event.order.currency")]),
+            "total": .object(["$engageValue": .string("event.order.total")]),
+        ])
+        fixture.evaluator.replaceCampaigns([
+            fixture.campaign(
+                triggers: [trigger],
+                variants: [variant],
+                personalization: InAppPersonalizationContext(fallbacks: [
+                    "event": .object([
+                        "amount": .string("fallback"),
+                        "order": .object([
+                            "currency": .string("EUR"),
+                            "total": .string("fallback"),
+                        ]),
+                    ]),
+                ])
+            ),
+        ])
+
+        fixture.evaluator.onSignal(.event("purchase", [
+            "amount": .string("42 €"),
+            "order": .object(["total": .string("42")]),
+        ]))
+
+        let payload = fixture.evaluator.candidates().first?.publicContent.payload
+        XCTAssertEqual(payload?["text"], .string("42 €"))
+        XCTAssertEqual(payload?["currency"], .string("EUR"))
+        XCTAssertEqual(payload?["total"], .string("42"))
+    }
+
     func testAutomationDocumentBecomesOneShotContent() throws {
         let document = RemoteDocument(
             module: .inApp,
@@ -101,6 +144,14 @@ final class InAppEvaluatorTests: XCTestCase {
                 "messageId": .string("message-12"),
                 "availableAt": .string("2026-08-02T12:00:00Z"),
                 "expiresAt": .string("2026-08-03T12:00:00Z"),
+                "personalization": .object([
+                    "values": .object([
+                        "profile": .object(["first_name": .string("Ada")]),
+                    ]),
+                    "fallbacks": .object([
+                        "profile": .object(["first_name": .string("friend")]),
+                    ]),
+                ]),
                 "content": .object([
                     "type": .string("SCENE"),
                     "payload": .object(["card": .object(["type": .string("text")])]),
@@ -120,6 +171,46 @@ final class InAppEvaluatorTests: XCTestCase {
         XCTAssertTrue(campaign.oneShot)
         XCTAssertEqual(campaign.messageId, "message-12")
         XCTAssertEqual(campaign.variants.first?.allocationPercentage, 100)
+        XCTAssertEqual(
+            campaign.personalization.values["profile"],
+            .object(["first_name": .string("Ada")])
+        )
+        XCTAssertEqual(
+            campaign.personalization.fallbacks["profile"],
+            .object(["first_name": .string("friend")])
+        )
+    }
+
+    func testEventOrScreenPreservesEventEligibilityAcrossScreenChanges() throws {
+        let fixture = try Fixture(seed: "seed", experienceId: "mixed")
+        let event = InAppTrigger(id: "purchase", type: .event, delaySeconds: 0, screenName: nil, eventName: "purchase", minimumSessions: nil, versionConstraint: nil)
+        let screen = InAppTrigger(id: "checkout", type: .screenView, delaySeconds: 0, screenName: "checkout", eventName: nil, minimumSessions: nil, versionConstraint: nil)
+        fixture.evaluator.replaceCampaigns([fixture.campaign(triggers: [screen, event])])
+        fixture.evaluator.onSignal(.screenViewed("home"))
+        fixture.evaluator.onSignal(.event("purchase", ["amount": .string("42")]))
+
+        XCTAssertEqual(fixture.evaluator.candidates().first?.matchedTrigger?.id, "purchase")
+        fixture.evaluator.onSignal(.screenViewed("checkout"))
+        fixture.evaluator.onSignal(.screenCleared)
+        XCTAssertEqual(fixture.evaluator.candidates().first?.matchedTrigger?.id, "purchase")
+    }
+
+    func testRuntimeTypeMismatchUsesTypedFallback() throws {
+        let fixture = try Fixture(seed: "seed", experienceId: "typed")
+        let trigger = InAppTrigger(id: "purchase", type: .event, delaySeconds: 0, screenName: nil, eventName: "purchase", minimumSessions: nil, versionConstraint: nil)
+        let variant = fixture.variant(payload: [
+            "font_size": .object(["$engageValue": .string("event.amount")]),
+        ])
+        fixture.evaluator.replaceCampaigns([fixture.campaign(
+            triggers: [trigger],
+            variants: [variant],
+            personalization: InAppPersonalizationContext(fallbacks: [
+                "event": .object(["amount": .integer(7)]),
+            ])
+        )])
+        fixture.evaluator.onSignal(.event("purchase", ["amount": .string("large")]))
+
+        XCTAssertEqual(fixture.evaluator.candidates().first?.payload["font_size"], .integer(7))
     }
 
     func testUnsupportedContentOrPresentationIsRejectedInsteadOfSilentlyChanged() {
@@ -173,14 +264,18 @@ private final class Fixture {
 
     deinit { try? FileManager.default.removeItem(at: directory) }
 
-    func variant(id: String = "default", allocation: Int = 100) -> InAppContentVariant {
+    func variant(
+        id: String = "default",
+        allocation: Int = 100,
+        payload: EngagePayload = ["card": .object([:])]
+    ) -> InAppContentVariant {
         InAppContentVariant(
             id: id,
             key: nil,
             locale: "und",
             allocationPercentage: allocation,
             type: .scene,
-            payload: ["card": .object([:])],
+            payload: payload,
             presentation: .embedded(EmbeddedPresentation(
                 placementKey: "home.hero",
                 emptyState: .collapse
@@ -197,7 +292,8 @@ private final class Fixture {
             cooldownMinutes: nil,
             redisplayAfterDismissal: true
         ),
-        variants: [InAppContentVariant]? = nil
+        variants: [InAppContentVariant]? = nil,
+        personalization: InAppPersonalizationContext = InAppPersonalizationContext()
     ) -> InAppCampaign {
         InAppCampaign(
             key: experienceId,
@@ -216,6 +312,7 @@ private final class Fixture {
             defaultLocale: "und",
             fallbackLocale: nil,
             variants: variants ?? [variant()],
+            personalization: personalization,
             oneShot: false
         )
     }

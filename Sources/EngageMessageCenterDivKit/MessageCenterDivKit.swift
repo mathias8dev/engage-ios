@@ -31,6 +31,7 @@ public struct EngageMessageCenterView: View {
     @State private var renderings: [InboxEntryId: InboxRenderingSnapshot] = [:]
     @State private var unreadCount = 0
     @State private var filter = InboxViewFilter.all
+    @State private var selectedEntryId: InboxEntryId?
     private let pager: InboxPager
 
     public init(messageCenter: MessageCenter = MessageCenterModule.shared) {
@@ -169,11 +170,32 @@ public struct EngageMessageCenterView: View {
                         .listRowBackground(Color.accentColor.opacity(0.08))
                 }
                 ForEach(visibleEntries) { entry in
-                    MessageCenterCard(
-                        entry: entry,
-                        rendering: renderings[entry.id],
-                        messageCenter: messageCenter
-                    )
+                    ZStack {
+                        NavigationLink(
+                            tag: entry.id,
+                            selection: $selectedEntryId,
+                            destination: {
+                                if let rendering = renderings[entry.id] {
+                                    MessageCenterDetailView(
+                                        entry: entry,
+                                        rendering: rendering,
+                                        messageCenter: messageCenter
+                                    )
+                                }
+                            },
+                            label: { EmptyView() }
+                        )
+                        .opacity(0)
+                        MessageCenterCard(
+                            entry: entry,
+                            rendering: renderings[entry.id],
+                            messageCenter: messageCenter,
+                            onOpen: {
+                                guard renderings[entry.id]?.surface(.detail) != nil else { return }
+                                selectedEntryId = entry.id
+                            }
+                        )
+                    }
                     .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -245,12 +267,13 @@ private struct MessageCenterCard: View {
     let entry: InboxEntry
     let rendering: InboxRenderingSnapshot?
     let messageCenter: MessageCenter
+    let onOpen: () -> Void
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Group {
                 if let rendering {
-                    DivKitSnapshotView(snapshot: rendering, messageCenter: messageCenter)
+                    DivKitSnapshotView(snapshot: rendering, surface: .summary, messageCenter: messageCenter)
                 } else {
                     Text(entry.key)
                         .foregroundStyle(.secondary)
@@ -281,8 +304,23 @@ private struct MessageCenterCard: View {
         }
         .shadow(color: Color.black.opacity(0.06), radius: 8, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onTapGesture { Task { await messageCenter.inbox.markRead(entry.id) } }
+        .onTapGesture(perform: onOpen)
         .accessibilityValue(entry.readAt == nil ? "Unread" : "Read")
+    }
+}
+
+private struct MessageCenterDetailView: View {
+    let entry: InboxEntry
+    let rendering: InboxRenderingSnapshot
+    let messageCenter: MessageCenter
+
+    var body: some View {
+        DivKitSnapshotView(snapshot: rendering, surface: .detail, messageCenter: messageCenter)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: .systemBackground))
+            .navigationTitle("Message details")
+            .navigationBarTitleDisplayMode(.inline)
+            .task { await messageCenter.inbox.markRead(entry.id) }
     }
 }
 
@@ -330,6 +368,7 @@ extension InboxEntry: Identifiable {}
 
 private struct DivKitSnapshotView: UIViewRepresentable {
     let snapshot: InboxRenderingSnapshot
+    let surface: InboxRenderingSurface
     let messageCenter: MessageCenter
 
     final class Coordinator {
@@ -371,11 +410,18 @@ private struct DivKitSnapshotView: UIViewRepresentable {
         )
     }
     private func update(_ view: DivView) {
-        guard let data = try? JSONEncoder().encode(JSONValue.object(snapshot.document)) else {
-            EngageLogger.error("MessageCenter.DivKit", "document encoding failed entryId=\(snapshot.entryId)")
+        guard let document = snapshot.surface(surface),
+              let data = try? JSONEncoder().encode(JSONValue.object(document)) else {
+            EngageLogger.error(
+                "MessageCenter.DivKit",
+                "document encoding failed entryId=\(snapshot.entryId) surface=\(surface.rawValue)"
+            )
             return
         }
-        EngageLogger.debug("MessageCenter.DivKit", "source updating entryId=\(snapshot.entryId) bytes=\(data.count)")
+        EngageLogger.debug(
+            "MessageCenter.DivKit",
+            "source updating entryId=\(snapshot.entryId) surface=\(surface.rawValue) bytes=\(data.count)"
+        )
         Task {
             await view.setSource(
                 DivViewSource(kind: .data(data), cardId: DivCardID(rawValue: snapshot.entryId.value)),

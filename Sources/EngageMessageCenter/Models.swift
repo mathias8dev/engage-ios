@@ -39,7 +39,20 @@ public struct InboxPagerState: Sendable {
 
 @_spi(Rendering) public struct InboxRenderingSnapshot: Sendable {
     public let entryId: InboxEntryId
-    public let renderer: String
+    public let renderer: InboxRenderer
     public let revision: Int64
-    public let document: EngagePayload
+    public let surfaces: [InboxRenderingSurface: EngagePayload]
+
+    public func surface(_ surface: InboxRenderingSurface) -> EngagePayload? {
+        surfaces[surface]
+    }
+}
+
+@_spi(Rendering) public enum InboxRenderer: String, Codable, Sendable {
+    case divKit = "DIVKIT"
+}
+
+@_spi(Rendering) public enum InboxRenderingSurface: String, Codable, CaseIterable, Sendable {
+    case summary = "SUMMARY"
+    case detail = "DETAIL"
 }
