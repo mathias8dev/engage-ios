@@ -4,7 +4,7 @@ The Engage iOS SDK provides installation and profile management, analytics, feat
 in-app experiences, and a DivKit-powered Message Center. It is distributed as one Swift package
 with a complete facade and independently consumable feature products.
 
-The current release is `2.1.0`. Release tags use semantic versions without a `v` prefix.
+The current release is `2.2.0`. Release tags use semantic versions without a `v` prefix.
 
 ## Requirements
 

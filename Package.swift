@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "EngageSDK",
+    defaultLocalization: "en",
     platforms: [.iOS(.v15)],
     products: [
         .library(name: "EngageSDK", targets: ["EngageSDK"]),

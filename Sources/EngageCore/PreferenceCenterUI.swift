@@ -51,21 +51,38 @@ public struct PreferenceCenterMaterialTheme {
 }
 
 public extension PreferenceCenter {
-    /// Builds Engage's ready-to-use UI. The headless `center(_:)` state remains the source of truth.
+    /// Builds Engage's ready-to-use UI with the system material theme.
+    /// The headless `center(_:)` state remains the source of truth.
+    @MainActor
+    func makeViewController(_ key: String? = nil) -> UIViewController {
+        makeViewController(key, materialTheme: .system)
+    }
+
+    /// Builds Engage's ready-to-use UI with a custom material theme.
+    /// The headless `center(_:)` state remains the source of truth.
     @MainActor
     func makeViewController(
         _ key: String? = nil,
-        materialTheme: PreferenceCenterMaterialTheme = .system
+        materialTheme: PreferenceCenterMaterialTheme
     ) -> UIViewController {
         PreferenceCenterViewController(snapshot: center(key), materialTheme: materialTheme)
     }
 
-    /// Presents the ready-to-use preference center from the current application hierarchy.
+    /// Presents the ready-to-use preference center with the system material theme.
+    @MainActor
+    func display(
+        _ key: String? = nil,
+        from presenter: UIViewController? = nil
+    ) {
+        display(key, from: presenter, materialTheme: .system)
+    }
+
+    /// Presents the ready-to-use preference center with a custom material theme.
     @MainActor
     func display(
         _ key: String? = nil,
         from presenter: UIViewController? = nil,
-        materialTheme: PreferenceCenterMaterialTheme = .system
+        materialTheme: PreferenceCenterMaterialTheme
     ) {
         let content = makeViewController(key, materialTheme: materialTheme)
         let navigation = UINavigationController(rootViewController: content)
