@@ -60,6 +60,12 @@ public final class PreferenceCenter: @unchecked Sendable {
         return state
     }
 
+    public func refresh() async throws {
+        EngageLogger.info("Core.Preferences", "manual refresh requested")
+        try await runtime.refresh()
+        EngageLogger.info("Core.Preferences", "manual refresh completed")
+    }
+
     private func observe(
         state: EngageState<PreferenceCenterSnapshot?>,
         identity: String,
