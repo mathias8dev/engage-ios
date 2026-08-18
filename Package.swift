@@ -31,6 +31,7 @@ let package = Package(
         ),
         .target(
             name: "EngageCore",
+            resources: [.process("Resources")],
             linkerSettings: [
                 .linkedFramework("Security", .when(platforms: [.iOS])),
                 .linkedFramework("Network", .when(platforms: [.iOS])),

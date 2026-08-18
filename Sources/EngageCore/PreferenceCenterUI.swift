@@ -1,18 +1,82 @@
 #if canImport(UIKit)
 import UIKit
 
+@MainActor
+public struct PreferenceCenterMaterialTheme {
+    public let primary: UIColor
+    public let onPrimary: UIColor
+    public let primaryContainer: UIColor
+    public let onPrimaryContainer: UIColor
+    public let surface: UIColor
+    public let surfaceContainerLow: UIColor
+    public let onSurface: UIColor
+    public let onSurfaceVariant: UIColor
+    public let outlineVariant: UIColor
+
+    public init(
+        primary: UIColor,
+        onPrimary: UIColor,
+        primaryContainer: UIColor,
+        onPrimaryContainer: UIColor,
+        surface: UIColor,
+        surfaceContainerLow: UIColor,
+        onSurface: UIColor,
+        onSurfaceVariant: UIColor,
+        outlineVariant: UIColor
+    ) {
+        self.primary = primary
+        self.onPrimary = onPrimary
+        self.primaryContainer = primaryContainer
+        self.onPrimaryContainer = onPrimaryContainer
+        self.surface = surface
+        self.surfaceContainerLow = surfaceContainerLow
+        self.onSurface = onSurface
+        self.onSurfaceVariant = onSurfaceVariant
+        self.outlineVariant = outlineVariant
+    }
+
+    public static var system: PreferenceCenterMaterialTheme {
+        PreferenceCenterMaterialTheme(
+            primary: .systemTeal,
+            onPrimary: .white,
+            primaryContainer: .secondarySystemBackground,
+            onPrimaryContainer: .label,
+            surface: .systemBackground,
+            surfaceContainerLow: .secondarySystemBackground,
+            onSurface: .label,
+            onSurfaceVariant: .secondaryLabel,
+            outlineVariant: .separator
+        )
+    }
+}
+
 public extension PreferenceCenter {
     /// Builds Engage's ready-to-use UI. The headless `center(_:)` state remains the source of truth.
     @MainActor
-    func makeViewController(_ key: String? = nil) -> UIViewController {
-        PreferenceCenterViewController(snapshot: center(key))
+    func makeViewController(
+        _ key: String? = nil,
+        materialTheme: PreferenceCenterMaterialTheme = .system
+    ) -> UIViewController {
+        PreferenceCenterViewController(snapshot: center(key), materialTheme: materialTheme)
     }
 
     /// Presents the ready-to-use preference center from the current application hierarchy.
     @MainActor
-    func display(_ key: String? = nil, from presenter: UIViewController? = nil) {
-        let content = makeViewController(key)
+    func display(
+        _ key: String? = nil,
+        from presenter: UIViewController? = nil,
+        materialTheme: PreferenceCenterMaterialTheme = .system
+    ) {
+        let content = makeViewController(key, materialTheme: materialTheme)
         let navigation = UINavigationController(rootViewController: content)
+        let navigationAppearance = UINavigationBarAppearance()
+        navigationAppearance.configureWithOpaqueBackground()
+        navigationAppearance.backgroundColor = materialTheme.surface
+        navigationAppearance.titleTextAttributes = [.foregroundColor: materialTheme.onSurface]
+        navigation.navigationBar.standardAppearance = navigationAppearance
+        navigation.navigationBar.scrollEdgeAppearance = navigationAppearance
+        navigation.navigationBar.compactAppearance = navigationAppearance
+        navigation.navigationBar.tintColor = materialTheme.primary
         guard let host = presenter ?? UIApplication.shared.engageTopViewController else {
             assertionFailure("Engage could not find a view controller to present the Preference Center")
             return
@@ -33,12 +97,14 @@ private final class PreferenceCenterViewController: UITableViewController {
     }
 
     private let snapshot: EngageState<PreferenceCenterSnapshot?>
+    private let materialTheme: PreferenceCenterMaterialTheme
     private var current: PreferenceCenterSnapshot?
     private var rows: [[Row]] = []
     private var observation: Task<Void, Never>?
 
-    init(snapshot: EngageState<PreferenceCenterSnapshot?>) {
+    init(snapshot: EngageState<PreferenceCenterSnapshot?>, materialTheme: PreferenceCenterMaterialTheme) {
         self.snapshot = snapshot
+        self.materialTheme = materialTheme
         super.init(style: .insetGrouped)
     }
 
@@ -47,13 +113,15 @@ private final class PreferenceCenterViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Preferences"
+        title = preferenceCenterLocalized("preference_center.title")
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .done,
             target: self,
             action: #selector(close)
         )
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "preference")
+        tableView.backgroundColor = materialTheme.surface
+        view.backgroundColor = materialTheme.surface
         apply(snapshot.value)
         observation = Task { [weak self, snapshot = self.snapshot] in
             for await value in snapshot.updates {
@@ -85,9 +153,13 @@ private final class PreferenceCenterViewController: UITableViewController {
         var configuration = cell.defaultContentConfiguration()
         configuration.text = row.title
         configuration.secondaryText = row.subtitle
+        configuration.textProperties.color = materialTheme.onSurface
+        configuration.secondaryTextProperties.color = materialTheme.onSurfaceVariant
         cell.contentConfiguration = configuration
+        cell.backgroundColor = materialTheme.surfaceContainerLow
         let toggle = UISwitch()
         toggle.isOn = row.selected
+        toggle.onTintColor = materialTheme.primary
         toggle.accessibilityLabel = row.title
         toggle.tag = encoded(indexPath)
         toggle.addTarget(self, action: #selector(toggleChanged(_:)), for: .valueChanged)
@@ -98,7 +170,7 @@ private final class PreferenceCenterViewController: UITableViewController {
 
     private func apply(_ value: PreferenceCenterSnapshot?) {
         current = value
-        title = value?.displayName ?? "Preferences"
+        title = value?.displayName ?? preferenceCenterLocalized("preference_center.title")
         rows = value?.sections.map { section in
             section.subscriptions.flatMap { preference -> [Row] in
                 var values: [Row] = []
@@ -126,7 +198,53 @@ private final class PreferenceCenterViewController: UITableViewController {
                 return values
             }
         } ?? []
+        tableView.backgroundView = value?.hasVisiblePreferences == true
+            ? nil
+            : unavailableView()
         tableView.reloadData()
+    }
+
+    private func unavailableView() -> UIView {
+        let container = UIView()
+        let icon = UIImageView(image: UIImage(systemName: "slider.horizontal.3"))
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 36, weight: .medium)
+        icon.tintColor = materialTheme.onPrimaryContainer
+        icon.contentMode = .scaleAspectFit
+        icon.backgroundColor = materialTheme.primaryContainer
+        icon.layer.cornerRadius = 24
+
+        let heading = UILabel()
+        heading.text = preferenceCenterLocalized("preference_center.unavailable.title")
+        heading.font = .preferredFont(forTextStyle: .headline)
+        heading.textColor = materialTheme.onSurface
+        heading.textAlignment = .center
+        heading.adjustsFontForContentSizeCategory = true
+
+        let message = UILabel()
+        message.text = preferenceCenterLocalized("preference_center.unavailable.body")
+        message.font = .preferredFont(forTextStyle: .body)
+        message.textColor = materialTheme.onSurfaceVariant
+        message.textAlignment = .center
+        message.numberOfLines = 0
+        message.adjustsFontForContentSizeCategory = true
+
+        let content = UIStackView(arrangedSubviews: [icon, heading, message])
+        content.axis = .vertical
+        content.alignment = .center
+        content.spacing = 10
+        content.setCustomSpacing(20, after: icon)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(content)
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 48),
+            icon.heightAnchor.constraint(equalToConstant: 48),
+            content.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            content.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 32),
+            content.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -32),
+            content.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            message.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
+        ])
+        return container
     }
 
     @objc private func toggleChanged(_ sender: UISwitch) {
@@ -167,6 +285,10 @@ private final class PreferenceCenterViewController: UITableViewController {
     private func decoded(_ value: Int) -> IndexPath {
         IndexPath(row: value % 10_000, section: value / 10_000)
     }
+}
+
+private func preferenceCenterLocalized(_ key: String) -> String {
+    NSLocalizedString(key, bundle: .module, comment: "")
 }
 
 private extension Channel {

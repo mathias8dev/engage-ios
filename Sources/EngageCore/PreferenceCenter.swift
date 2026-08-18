@@ -6,6 +6,17 @@ public struct PreferenceCenterSnapshot: Equatable, Sendable {
     public let description: String?
     public let sections: [PreferenceSection]
 }
+
+extension PreferenceCenterSnapshot {
+    var hasVisiblePreferences: Bool {
+        sections.contains { section in
+            section.subscriptions.contains { preference in
+                preference.installationChoice != nil || !(preference.profileChoices?.isEmpty ?? true)
+            }
+        }
+    }
+}
+
 public struct PreferenceSection: Equatable, Sendable {
     public let key: String
     public let title: String?
