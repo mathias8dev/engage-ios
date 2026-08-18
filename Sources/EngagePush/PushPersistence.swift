@@ -8,23 +8,26 @@ struct PushStoredState: Codable, Equatable, Sendable {
     var token: String?
     var pendingSubscription = false
     var reportedPermission: String?
+    var processedDeliveryIds: [String] = []
 
     init(
         subscription: String = "OPTED_IN",
         registeredTokenHash: String? = nil,
         token: String? = nil,
         pendingSubscription: Bool = false,
-        reportedPermission: String? = nil
+        reportedPermission: String? = nil,
+        processedDeliveryIds: [String] = []
     ) {
         self.subscription = subscription
         self.registeredTokenHash = registeredTokenHash
         self.token = token
         self.pendingSubscription = pendingSubscription
         self.reportedPermission = reportedPermission
+        self.processedDeliveryIds = processedDeliveryIds
     }
 
     private enum CodingKeys: String, CodingKey {
-        case subscription, registeredTokenHash, token, pendingSubscription, reportedPermission
+        case subscription, registeredTokenHash, token, pendingSubscription, reportedPermission, processedDeliveryIds
     }
 
     init(from decoder: Decoder) throws {
@@ -34,6 +37,7 @@ struct PushStoredState: Codable, Equatable, Sendable {
         token = try values.decodeIfPresent(String.self, forKey: .token)
         pendingSubscription = try values.decodeIfPresent(Bool.self, forKey: .pendingSubscription) ?? false
         reportedPermission = try values.decodeIfPresent(String.self, forKey: .reportedPermission)
+        processedDeliveryIds = try values.decodeIfPresent([String].self, forKey: .processedDeliveryIds) ?? []
     }
 }
 
@@ -84,6 +88,19 @@ final class PushPersistence: @unchecked Sendable {
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         stored = candidate
         EngageLogger.debug("Push.Storage", "state persisted bytes=\(data.count)")
+    }
+
+    func claimDelivery(_ deliveryId: String, limit: Int = 100) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stored.processedDeliveryIds.contains(deliveryId) else { return false }
+        var candidate = stored
+        candidate.processedDeliveryIds.append(deliveryId)
+        candidate.processedDeliveryIds = Array(candidate.processedDeliveryIds.suffix(max(1, limit)))
+        let data = try JSONEncoder().encode(candidate)
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        stored = candidate
+        return true
     }
 
     func wipe() throws {

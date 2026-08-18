@@ -61,6 +61,20 @@ category `Engage` in Console. They include lifecycle transitions and the technic
 `installationId`, but never credentials, push tokens, binding codes, user attribute values, or
 payload values.
 
+When the same release both upgrades from endpoint-scoped SDK storage and changes the API endpoint,
+declare the previous endpoint so Engage can move the correct App Key's durable state:
+
+```swift
+EngageConfig(
+    appKey: BuildConfiguration.engageAppKey,
+    endpoint: BuildConfiguration.engageEndpoint,
+    legacyEndpoints: [BuildConfiguration.previousEngageEndpoint]
+)
+```
+
+This one-time migration option is unnecessary when the endpoint is unchanged. It is explicit so a
+process configured with several Engage App Keys never guesses which legacy storage it owns.
+
 ## Configure push notifications
 
 Engage sends iOS push notifications directly through APNs. Firebase Cloud Messaging is not part of

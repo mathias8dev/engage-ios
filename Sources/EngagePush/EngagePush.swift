@@ -320,8 +320,27 @@ public final class Push: @unchecked Sendable {
             EngageLogger.verbose("Push", "foreground notification ignored reason=not_engage")
             return []
         }
+        if let target = payload.installationId, target != context.installationId.value {
+            EngageLogger.debug(
+                "Push",
+                "foreground notification ignored deliveryId=\(payload.deliveryId) reason=installation_mismatch"
+            )
+            return []
+        }
         guard canRun else {
             EngageLogger.debug("Push", "foreground notification ignored deliveryId=\(payload.deliveryId) reason=disabled")
+            return []
+        }
+        do {
+            guard try persistence.claimDelivery(payload.deliveryId) else {
+                EngageLogger.debug(
+                    "Push",
+                    "foreground notification ignored deliveryId=\(payload.deliveryId) reason=duplicate_delivery"
+                )
+                return []
+            }
+        } catch {
+            EngageLogger.error("Push", "foreground delivery claim failed", error: error)
             return []
         }
         EngageLogger.info(
@@ -340,6 +359,13 @@ public final class Push: @unchecked Sendable {
     fileprivate func didReceive(_ response: UNNotificationResponse) {
         guard let payload = PushPayload(response.notification.request.content.userInfo) else {
             EngageLogger.verbose("Push", "notification response ignored reason=not_engage")
+            return
+        }
+        if let target = payload.installationId, target != context.installationId.value {
+            EngageLogger.debug(
+                "Push",
+                "notification response ignored deliveryId=\(payload.deliveryId) reason=installation_mismatch"
+            )
             return
         }
         guard canRun else {
@@ -502,6 +528,7 @@ private enum PushDelegateCoordinator {
 
 private struct PushPayload {
     let deliveryId: String, messageId: String
+    let installationId: String?
     let actionType: String, actionValue: String?
     let arguments: EngagePayload
     let customData: [String: String]
@@ -523,6 +550,7 @@ private struct PushPayload {
             return nil
         }
         deliveryId = delivery; messageId = message
+        installationId = engage["engage_installation_id"] as? String
         actionType = engage["engage_action_type"] as? String ?? "OPEN_APP"
         actionValue = engage["engage_action_value"] as? String
         let strings = engage.compactMapValues { $0 as? String }

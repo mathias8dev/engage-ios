@@ -47,6 +47,22 @@ final class PushPersistenceTests: XCTestCase {
         XCTAssertEqual(PushPersistence(directory: directory).value, PushStoredState())
     }
 
+    func testDeliveryClaimsAreDurableAndBounded() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = PushPersistence(directory: directory)
+
+        XCTAssertTrue(try persistence.claimDelivery("delivery-1", limit: 2))
+        XCTAssertFalse(try PushPersistence(directory: directory).claimDelivery("delivery-1", limit: 2))
+        XCTAssertTrue(try persistence.claimDelivery("delivery-2", limit: 2))
+        XCTAssertTrue(try persistence.claimDelivery("delivery-3", limit: 2))
+
+        XCTAssertEqual(
+            PushPersistence(directory: directory).value.processedDeliveryIds,
+            ["delivery-2", "delivery-3"]
+        )
+    }
+
     func testWipeFailureDoesNotClaimThatMemoryWasCleared() throws {
         enum ExpectedFailure: Error { case disk }
         let directory = try temporaryDirectory()
