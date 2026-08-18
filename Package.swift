@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "EngageSDK",
+    defaultLocalization: "en",
     platforms: [.iOS(.v15)],
     products: [
         .library(name: "EngageSDK", targets: ["EngageSDK"]),
@@ -31,6 +32,7 @@ let package = Package(
         ),
         .target(
             name: "EngageCore",
+            resources: [.process("Resources")],
             linkerSettings: [
                 .linkedFramework("Security", .when(platforms: [.iOS])),
                 .linkedFramework("Network", .when(platforms: [.iOS])),
@@ -53,12 +55,14 @@ let package = Package(
                 "EngageCore",
                 "EngageMessageCenter",
                 .product(name: "DivKit", package: "divkit-ios", condition: .when(platforms: [.iOS])),
-            ]
+            ],
+            resources: [.process("Resources")]
         ),
         .testTarget(name: "EngageCoreTests", dependencies: ["EngageCore"]),
         .testTarget(name: "EngageSDKTests", dependencies: ["EngageSDK"]),
         .testTarget(name: "EngageInAppTests", dependencies: ["EngageInApp"]),
         .testTarget(name: "EngageMessageCenterTests", dependencies: ["EngageMessageCenter"]),
+        .testTarget(name: "EngageMessageCenterDivKitTests", dependencies: ["EngageMessageCenterDivKit"]),
         .testTarget(name: "EngagePushTests", dependencies: ["EngagePush"]),
     ]
 )

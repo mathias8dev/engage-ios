@@ -4,6 +4,9 @@ import EngageCore
 
 public final class MessageCenter: @unchecked Sendable {
     public let inbox: Inbox
+    @_spi(Rendering) public var presentationState: EngageState<MessageCenterPresentationState> {
+        inbox.presentationState
+    }
 
     init(context: EngageModuleContext) {
         EngageLogger.info("MessageCenter", "initializing generation=\(context.generation.value)")
@@ -46,11 +49,13 @@ public final class Inbox: @unchecked Sendable {
     private let registryLock = NSLock()
     private var pagers: [UUID: WeakPager] = [:]
     private var activeGeneration: Int64
+    private var lifecycleRevision: Int64 = 0
     private var expiryTask: Task<Void, Never>?
     private var mutationRetryTask: Task<Void, Never>?
     private var mutationRetryId: UUID?
 
     public let unreadCount: EngageState<Int>
+    fileprivate let presentationState: EngageState<MessageCenterPresentationState>
     fileprivate let enabled = EngageState(false)
     fileprivate let globalError = EngageState<InboxError?>(nil)
 
@@ -62,6 +67,13 @@ public final class Inbox: @unchecked Sendable {
         activeGeneration = context.generation.value
         resolvedStore.activate(activeGeneration)
         unreadCount = EngageState(0)
+        presentationState = EngageState(MessageCenterPresentationState(
+            lifecycleRevision: 0,
+            generation: activeGeneration,
+            isEnabled: false,
+            entryIds: Set(resolvedStore.entries().map(\.id)),
+            deletedEntryIds: resolvedStore.pendingDeletedEntryIds
+        ))
         EngageLogger.info(
             "MessageCenter.Inbox",
             "initialized generation=\(activeGeneration) installationId=\(context.installationId.value ?? "none")"
@@ -81,6 +93,7 @@ public final class Inbox: @unchecked Sendable {
                 )
                 updateUnreadCount()
                 scheduleExpiry()
+                publishPresentationState()
             }
         }
         Task { [weak self] in
@@ -101,10 +114,13 @@ public final class Inbox: @unchecked Sendable {
         updateRuntimeState()
     }
 
-    public func pager(pageSize: Int = 20) -> InboxPager {
+    public func pager(pageSize: Int = 20, sortOrder: InboxSortOrder = .newestFirst) -> InboxPager {
         precondition((1...100).contains(pageSize), "Inbox pageSize must be between 1 and 100")
-        let pager = InboxPager(inbox: self, pageSize: pageSize)
-        EngageLogger.info("MessageCenter.Inbox", "pager creating id=\(pager.id) pageSize=\(pageSize)")
+        let pager = InboxPager(inbox: self, pageSize: pageSize, sortOrder: sortOrder)
+        EngageLogger.info(
+            "MessageCenter.Inbox",
+            "pager creating id=\(pager.id) pageSize=\(pageSize) sortOrder=\(sortOrder.rawValue)"
+        )
         registryLock.lock()
         pagers[pager.id] = WeakPager(pager)
         registryLock.unlock()
@@ -113,12 +129,9 @@ public final class Inbox: @unchecked Sendable {
     }
 
     public func markRead(_ id: InboxEntryId) async {
-        guard let entry = store.entry(id.value) else {
-            EngageLogger.debug("MessageCenter.Inbox", "markRead ignored entryId=\(id) reason=not_found")
-            return
-        }
-        EngageLogger.info("MessageCenter.Inbox", "markRead requested entryId=\(id)")
-        await mutate("MARK_READ", id: id, when: entry.readAt == nil, wasUnread: true)
+        let entry = store.entry(id.value)
+        EngageLogger.info("MessageCenter.Inbox", "markRead requested entryId=\(id) cached=\(entry != nil)")
+        await mutate("MARK_READ", id: id, when: entry?.readAt == nil, wasUnread: entry == nil ? nil : true)
     }
 
     public func markUnread(_ id: InboxEntryId) async {
@@ -134,12 +147,17 @@ public final class Inbox: @unchecked Sendable {
 
     public func delete(_ id: InboxEntryId) async {
         let entry = store.entry(id.value)
-        EngageLogger.info("MessageCenter.Inbox", "delete requested entryId=\(id)")
-        await mutate("DELETE", id: id, when: entry != nil, wasUnread: entry?.readAt == nil)
+        EngageLogger.info("MessageCenter.Inbox", "delete requested entryId=\(id) cached=\(entry != nil)")
+        await mutate("DELETE", id: id, when: true, wasUnread: entry.map { $0.readAt == nil })
     }
 
-    fileprivate func fetchPage(cursor: String?, pageSize: Int, generation: Int64) async throws -> RemotePage {
-        let request = PageRequest(generation: generation, pageSize: pageSize, cursor: cursor)
+    fileprivate func fetchPage(
+        cursor: String?,
+        pageSize: Int,
+        generation: Int64,
+        sortOrder: InboxSortOrder
+    ) async throws -> RemotePage {
+        let request = PageRequest(generation: generation, pageSize: pageSize, cursor: cursor, sortOrder: sortOrder)
         EngageLogger.debug(
             "MessageCenter.Inbox",
             "page fetch requested generation=\(generation) pageSize=\(pageSize) hasCursor=\(cursor != nil)"
@@ -152,7 +170,7 @@ public final class Inbox: @unchecked Sendable {
             let response = try await context.authorizedRequest(
                 method: "GET",
                 path: "sdk/inbox",
-                query: ["pageSize": String(pageSize)].merging(
+                query: ["pageSize": String(pageSize), "sortOrder": sortOrder.rawValue].merging(
                     cursor.map { ["cursor": $0] } ?? [:],
                     uniquingKeysWith: { _, new in new }
                 )
@@ -173,7 +191,8 @@ public final class Inbox: @unchecked Sendable {
                 entries: page.entries,
                 nextCursor: page.nextCursor,
                 hasMore: page.hasMore,
-                unreadCount: page.unreadCount
+                unreadCount: page.unreadCount,
+                sortOrder: sortOrder
             ) else { throw inboxError(.localPersistence, "Inbox page could not be persisted", retryable: true) }
             return page
         }
@@ -308,22 +327,30 @@ public final class Inbox: @unchecked Sendable {
     }
 
     fileprivate func resolveRenderings(_ ids: [InboxEntryId]) async throws -> [InboxRenderingSnapshot] {
-        let requested = Array(Set(ids)).prefix(100).filter { store.contains($0.value) }
+        let requested = Array(Set(ids)).prefix(100)
         guard !requested.isEmpty else {
-            EngageLogger.verbose("MessageCenter.Rendering", "resolution skipped reason=no_cached_entries")
+            EngageLogger.verbose("MessageCenter.Rendering", "resolution skipped reason=no_entries")
             return []
         }
+        let presentation = presentationState.value
+        guard presentation.isEnabled else {
+            throw inboxError(.unauthorized, "Inbox rendering is disabled", retryable: false)
+        }
+        let generation = presentation.generation
+        let lifecycleRevision = presentation.lifecycleRevision
         EngageLogger.debug("MessageCenter.Rendering", "resolution started requested=\(requested.count)")
 
         let cached = store.cachedRenderings(Array(requested))
         let cachedIds = Set(cached.map(\.entryId))
         let missing = requested.filter { !cachedIds.contains($0) }
         guard !missing.isEmpty else {
+            let currentPresentation = presentationState.value
+            guard currentPresentation.lifecycleRevision == lifecycleRevision,
+                  currentPresentation.generation == generation,
+                  currentPresentation.isEnabled else {
+                throw inboxError(.generationChanged, "Inbox identity changed during rendering resolution", retryable: true)
+            }
             EngageLogger.info("MessageCenter.Rendering", "resolution completed from cache count=\(cached.count)")
-            return orderedRenderings(cached, ids: requested)
-        }
-        guard enabled.value else {
-            EngageLogger.debug("MessageCenter.Rendering", "remote resolution skipped reason=disabled cached=\(cached.count)")
             return orderedRenderings(cached, ids: requested)
         }
         EngageLogger.debug("MessageCenter.Rendering", "remote resolution requesting count=\(missing.count)")
@@ -339,20 +366,32 @@ public final class Inbox: @unchecked Sendable {
         let values = try raw.map { value -> InboxRenderingSnapshot in
             guard let item = value.objectValue,
                   let id = item.string("entryId"),
-                  let renderer = item.string("renderer"),
+                  let rendererValue = item.string("renderer"),
+                  let renderer = InboxRenderer(rawValue: rendererValue),
                   let revision = item.integer("revision"),
-                  let document = item.object("document") else { throw invalidResponse() }
+                  let rawSurfaces = item.object("surfaces") else { throw invalidResponse() }
+            let surfaces = try Dictionary(uniqueKeysWithValues: InboxRenderingSurface.allCases.map { surface in
+                guard let document = rawSurfaces.object(surface.rawValue) else { throw invalidResponse() }
+                return (surface, document)
+            })
             return InboxRenderingSnapshot(
                 entryId: InboxEntryId(id),
                 renderer: renderer,
                 revision: revision,
-                document: document
+                surfaces: surfaces,
+                expiresAt: item.string("expiresAt").flatMap(parseDate)
             )
         }
         let returned = values.map(\.entryId)
         guard returned.count == Set(returned).count,
               Set(returned).isSubset(of: Set(missing)) else { throw invalidResponse() }
-        guard store.saveRenderings(values) else {
+        let currentPresentation = presentationState.value
+        guard currentPresentation.lifecycleRevision == lifecycleRevision,
+              currentPresentation.generation == generation,
+              currentPresentation.isEnabled else {
+            throw inboxError(.generationChanged, "Inbox identity changed during rendering resolution", retryable: true)
+        }
+        guard store.saveRenderings(values, generation: generation) else {
             throw inboxError(.localPersistence, "Inbox renderings could not be persisted", retryable: true)
         }
         EngageLogger.info("MessageCenter.Rendering", "remote resolution completed count=\(values.count)")
@@ -366,7 +405,9 @@ public final class Inbox: @unchecked Sendable {
         EngageLogger.info("MessageCenter.Inbox", "pager unregistered id=\(pager.id)")
     }
 
-    fileprivate func cachedWindow(pageSize: Int) -> CachedInboxWindow { store.cachedWindow(pageSize: pageSize) }
+    fileprivate func cachedWindow(pageSize: Int, sortOrder: InboxSortOrder) -> CachedInboxWindow {
+        store.cachedWindow(pageSize: pageSize, sortOrder: sortOrder)
+    }
     fileprivate func projectedEntries(ids: [String]) -> [InboxEntry] {
         guard enabled.value else { return [] }
         return store.entries(ids: ids)
@@ -378,11 +419,13 @@ public final class Inbox: @unchecked Sendable {
             && context.privacy.value == .optedIn
             && context.enabledFeatures.value.contains(.messageCenter)
         let changedGeneration = generation != activeGeneration || store.generation != generation
+        let wasEnabled = enabled.value
         EngageLogger.debug(
             "MessageCenter.Inbox",
             "runtime state generation=\(generation) enabled=\(isEnabled) changedGeneration=\(changedGeneration)"
         )
         activeGeneration = generation
+        if changedGeneration || wasEnabled && !isEnabled { lifecycleRevision += 1 }
         if changedGeneration, !store.activate(generation) {
             globalError.set(inboxError(
                 .localPersistence,
@@ -390,16 +433,18 @@ public final class Inbox: @unchecked Sendable {
                 retryable: true
             ))
         }
-        let wasEnabled = enabled.value
         enabled.set(isEnabled)
         updateUnreadCount()
+        publishPresentationState()
         if changedGeneration { livePagers().forEach { $0.generationChanged(generation) } }
+        else if isEnabled, !wasEnabled { livePagers().forEach { $0.runtimeEnabled() } }
         if isEnabled, !wasEnabled || changedGeneration { catchUp() }
         if !isEnabled { expiryTask?.cancel(); expiryTask = nil }
     }
 
     fileprivate func wipe() throws {
         EngageLogger.warning("MessageCenter.Inbox", "wipe started")
+        lifecycleRevision += 1
         enabled.set(false)
         registryLock.lock()
         let retry = mutationRetryTask
@@ -410,6 +455,7 @@ public final class Inbox: @unchecked Sendable {
         try store.wipe()
         unreadCount.set(0)
         globalError.set(nil)
+        publishPresentationState()
         livePagers().forEach { $0.generationChanged(context.generation.value) }
         EngageLogger.warning("MessageCenter.Inbox", "wipe completed")
     }
@@ -428,7 +474,12 @@ public final class Inbox: @unchecked Sendable {
     private func refreshUnreadCount() async {
         EngageLogger.debug("MessageCenter.Inbox", "unread refresh started")
         do {
-            _ = try await fetchPage(cursor: nil, pageSize: 20, generation: context.generation.value)
+            _ = try await fetchPage(
+                cursor: nil,
+                pageSize: 20,
+                generation: context.generation.value,
+                sortOrder: .newestFirst
+            )
             if globalError.value?.isRetryable == true { globalError.set(nil) }
             EngageLogger.info("MessageCenter.Inbox", "unread refresh completed unread=\(unreadCount.value)")
         } catch {
@@ -450,6 +501,16 @@ public final class Inbox: @unchecked Sendable {
         let value = enabled.value && store.generation == context.generation.value ? store.unreadCount : 0
         unreadCount.set(value)
         EngageLogger.verbose("MessageCenter.Inbox", "unread count updated value=\(value)")
+    }
+
+    private func publishPresentationState() {
+        presentationState.set(MessageCenterPresentationState(
+            lifecycleRevision: lifecycleRevision,
+            generation: context.generation.value,
+            isEnabled: enabled.value,
+            entryIds: Set(store.entries().map(\.id)),
+            deletedEntryIds: store.pendingDeletedEntryIds
+        ))
     }
 
     private func scheduleExpiry() {
@@ -520,6 +581,7 @@ public final class InboxPager: @unchecked Sendable {
     fileprivate let id = UUID()
     private weak var inbox: Inbox?
     private let pageSize: Int
+    private let sortOrder: InboxSortOrder
     private let lock = NSLock()
     private let commands = PagerCommandGate()
     private var window: PagerWindow
@@ -528,12 +590,15 @@ public final class InboxPager: @unchecked Sendable {
 
     public let state = EngageState(InboxPagerState())
 
-    fileprivate init(inbox: Inbox, pageSize: Int) {
+    fileprivate init(inbox: Inbox, pageSize: Int, sortOrder: InboxSortOrder) {
         self.inbox = inbox
         self.pageSize = pageSize
+        self.sortOrder = sortOrder
         window = PagerWindow(generation: inbox.context.generation.value)
         EngageLogger.debug("MessageCenter.Pager", "created id=\(id) pageSize=\(pageSize)")
     }
+
+    deinit { close() }
 
     fileprivate func initialize() {
         guard let inbox else { return }
@@ -586,6 +651,17 @@ public final class InboxPager: @unchecked Sendable {
         if inbox?.enabled.value == true { Task { [weak self] in await self?.refresh() } }
     }
 
+    fileprivate func runtimeEnabled() {
+        lock.lock()
+        let isClosed = closed
+        lock.unlock()
+        guard !isClosed else { return }
+        EngageLogger.info("MessageCenter.Pager", "runtime enabled id=\(id)")
+        restoreCachedWindow()
+        project()
+        Task { [weak self] in await self?.refresh() }
+    }
+
     private func performRefresh() async {
         guard let inbox, isOpen, inbox.enabled.value else {
             EngageLogger.debug("MessageCenter.Pager", "refresh skipped id=\(id) reason=closed_or_disabled")
@@ -604,7 +680,12 @@ public final class InboxPager: @unchecked Sendable {
             repeat {
                 let cursorKey = cursor ?? "\u{0}first"
                 guard visited.insert(cursorKey).inserted else { throw invalidResponse("Inbox cursor loop detected") }
-                let page = try await inbox.fetchPage(cursor: cursor, pageSize: pageSize, generation: generation)
+                let page = try await inbox.fetchPage(
+                    cursor: cursor,
+                    pageSize: pageSize,
+                    generation: generation,
+                    sortOrder: sortOrder
+                )
                 for entry in page.entries where !ids.contains(entry.id.value) { ids.append(entry.id.value) }
                 cursor = page.nextCursor
                 hasMore = page.hasMore
@@ -642,7 +723,12 @@ public final class InboxPager: @unchecked Sendable {
         setWindow(current.with(refreshing: false, loadingMore: true, error: nil))
         EngageLogger.debug("MessageCenter.Pager", "load next started id=\(id) generation=\(generation)")
         do {
-            let page = try await inbox.fetchPage(cursor: cursor, pageSize: pageSize, generation: generation)
+            let page = try await inbox.fetchPage(
+                cursor: cursor,
+                pageSize: pageSize,
+                generation: generation,
+                sortOrder: sortOrder
+            )
             guard inbox.context.generation.value == generation else {
                 throw inboxError(.generationChanged, "Inbox generation changed", retryable: true)
             }
@@ -663,7 +749,7 @@ public final class InboxPager: @unchecked Sendable {
 
     private func restoreCachedWindow() {
         guard let inbox, isOpen else { return }
-        let cached = inbox.cachedWindow(pageSize: pageSize)
+        let cached = inbox.cachedWindow(pageSize: pageSize, sortOrder: sortOrder)
         EngageLogger.debug("MessageCenter.Pager", "cache restored id=\(id) entries=\(cached.entryIds.count) hasMore=\(cached.hasMore)")
         setWindow(PagerWindow(
             generation: inbox.context.generation.value,
@@ -766,6 +852,7 @@ private struct PageRequest: Hashable, Sendable {
     let generation: Int64
     let pageSize: Int
     let cursor: String?
+    let sortOrder: InboxSortOrder
 }
 
 private actor PageTaskRegistry {

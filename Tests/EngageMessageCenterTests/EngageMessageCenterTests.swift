@@ -104,11 +104,11 @@ final class EngageMessageCenterTests: XCTestCase {
         XCTAssertTrue(store.saveRenderings([
             InboxRenderingSnapshot(
                 entryId: InboxEntryId("message-1"),
-                renderer: "DIVKIT",
+                renderer: .divKit,
                 revision: 2,
-                document: ["card": .string("cached")]
+                surfaces: renderingSurfaces()
             ),
-        ]))
+        ], generation: 4))
         XCTAssertTrue(store.enqueue(InboxMutation(
             operationId: "delete-rejected",
             generation: 4,
@@ -184,20 +184,108 @@ final class EngageMessageCenterTests: XCTestCase {
         XCTAssertTrue(store.saveRenderings([
             InboxRenderingSnapshot(
                 entryId: InboxEntryId("a"),
-                renderer: "DIVKIT",
+                renderer: .divKit,
                 revision: 11,
-                document: ["card": .string("cached")]
+                surfaces: renderingSurfaces()
             ),
-        ]))
+        ], generation: 8))
 
         let reloaded = InboxStore(directory: directory)
         XCTAssertEqual(reloaded.cachedWindow(pageSize: 2).entryIds, ["a", "b"])
-        XCTAssertEqual(reloaded.cachedRenderings([InboxEntryId("a")]).first?.revision, 11)
+        let restoredRendering = reloaded.cachedRenderings([InboxEntryId("a")]).first
+        XCTAssertEqual(restoredRendering?.revision, 11)
+        XCTAssertEqual(restoredRendering?.surfaces[.summary]?.string("card"), "summary")
+        XCTAssertEqual(restoredRendering?.surfaces[.detail]?.string("card"), "detail")
 
         XCTAssertTrue(reloaded.activate(9))
         XCTAssertTrue(reloaded.entries().isEmpty)
         XCTAssertTrue(reloaded.cachedWindow(pageSize: 2).entryIds.isEmpty)
         XCTAssertTrue(reloaded.cachedRenderings([InboxEntryId("a")]).isEmpty)
+    }
+
+    func testDirectRenderingCanBeCachedWithoutPagingAndExpiresLocally() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(10))
+        let directId = InboxEntryId("direct-entry")
+        XCTAssertTrue(store.saveRenderings([
+            InboxRenderingSnapshot(
+                entryId: directId,
+                renderer: .divKit,
+                revision: 1,
+                surfaces: renderingSurfaces(),
+                expiresAt: Date(timeIntervalSinceNow: 3_600)
+            ),
+        ], generation: 10))
+        XCTAssertEqual(store.cachedRenderings([directId]).map(\.entryId), [directId])
+
+        let expiredId = InboxEntryId("expired-direct-entry")
+        XCTAssertTrue(store.saveRenderings([
+            InboxRenderingSnapshot(
+                entryId: expiredId,
+                renderer: .divKit,
+                revision: 1,
+                surfaces: renderingSurfaces(),
+                expiresAt: Date(timeIntervalSince1970: 1)
+            ),
+        ], generation: 10))
+        XCTAssertTrue(store.cachedRenderings([expiredId]).isEmpty)
+    }
+
+    func testUncachedPendingDeletionIsExposedToPresentationConsumers() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(7))
+
+        XCTAssertTrue(store.enqueue(InboxMutation(
+            operationId: "delete-direct",
+            generation: 7,
+            type: "DELETE",
+            entryId: "direct-entry",
+            occurredAt: "2026-08-18T12:00:00Z",
+            wasUnread: nil
+        )))
+
+        XCTAssertEqual(store.pendingDeletedEntryIds, [InboxEntryId("direct-entry")])
+    }
+
+    func testStaleGenerationCannotPersistPageRenderingOrMutation() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(10))
+
+        XCTAssertFalse(store.savePage(
+            generation: 9,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "stale-entry")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1
+        ))
+        XCTAssertFalse(store.saveRenderings([
+            InboxRenderingSnapshot(
+                entryId: InboxEntryId("stale-entry"),
+                renderer: .divKit,
+                revision: 1,
+                surfaces: renderingSurfaces()
+            ),
+        ], generation: 9))
+        XCTAssertFalse(store.enqueue(InboxMutation(
+            operationId: "stale-operation",
+            generation: 9,
+            type: "MARK_READ",
+            entryId: "stale-entry",
+            occurredAt: "2026-08-18T12:00:00Z",
+            wasUnread: true
+        )))
+
+        XCTAssertTrue(store.entries().isEmpty)
+        XCTAssertTrue(store.cachedRenderings([InboxEntryId("stale-entry")]).isEmpty)
+        XCTAssertTrue(store.pending(generation: 9).isEmpty)
     }
 
     func testFailedPersistenceDoesNotExposeAnOptimisticMutation() {
@@ -211,6 +299,36 @@ final class EngageMessageCenterTests: XCTestCase {
         XCTAssertTrue(store.pending(generation: 4).isEmpty)
     }
 
+    func testCachedWindowsAreIsolatedBySortOrder() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(4))
+        XCTAssertTrue(store.savePage(
+            generation: 4,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "newest")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1,
+            sortOrder: .newestFirst
+        ))
+        XCTAssertTrue(store.savePage(
+            generation: 4,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "oldest")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1,
+            sortOrder: .oldestFirst
+        ))
+
+        XCTAssertEqual(store.cachedWindow(pageSize: 20, sortOrder: .newestFirst).entryIds, ["newest"])
+        XCTAssertEqual(store.cachedWindow(pageSize: 20, sortOrder: .oldestFirst).entryIds, ["oldest"])
+    }
+
     private func makeEntry(id: String, readAt: Date? = nil) -> InboxEntry {
         InboxEntry(
             id: InboxEntryId(id),
@@ -220,6 +338,13 @@ final class EngageMessageCenterTests: XCTestCase {
             expiresAt: nil,
             readAt: readAt
         )
+    }
+
+    private func renderingSurfaces() -> [InboxRenderingSurface: EngagePayload] {
+        [
+            .summary: ["card": .string("summary")],
+            .detail: ["card": .string("detail")],
+        ]
     }
 
     private func temporaryDirectory() throws -> URL {

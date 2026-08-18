@@ -4,7 +4,7 @@ The Engage iOS SDK provides installation and profile management, analytics, feat
 in-app experiences, and a DivKit-powered Message Center. It is distributed as one Swift package
 with a complete facade and independently consumable feature products.
 
-The current release is `2.1.0`. Release tags use semantic versions without a `v` prefix.
+The current release is `2.2.0`. Release tags use semantic versions without a `v` prefix.
 
 ## Requirements
 
@@ -60,6 +60,20 @@ Use `.verbose` while integrating. `.info` is the default. Logs use subsystem `io
 category `Engage` in Console. They include lifecycle transitions and the technical
 `installationId`, but never credentials, push tokens, binding codes, user attribute values, or
 payload values.
+
+When the same release both upgrades from endpoint-scoped SDK storage and changes the API endpoint,
+declare the previous endpoint so Engage can move the correct App Key's durable state:
+
+```swift
+EngageConfig(
+    appKey: BuildConfiguration.engageAppKey,
+    endpoint: BuildConfiguration.engageEndpoint,
+    legacyEndpoints: [BuildConfiguration.previousEngageEndpoint]
+)
+```
+
+This one-time migration option is unnecessary when the endpoint is unchanged. It is explicit so a
+process configured with several Engage App Keys never guesses which legacy storage it owns.
 
 ## Configure push notifications
 
@@ -216,11 +230,43 @@ The complete product exports a ready-to-use SwiftUI inbox:
 import EngageSDK
 
 EngageMessageCenterView(messageCenter: Engage.messageCenter)
+Engage.messageCenter.display()
+Engage.messageCenter.display(entryId: entry.id)
 ```
 
-For a custom UI, consume `Engage.messageCenter.inbox.unreadCount`, create an `InboxPager`, and call
-the inbox mutation methods directly. Rendering documents remain separate from inbox metadata so a
-custom list does not need to understand the DivKit payload until a message is opened.
+The ready-made view renders each template's compact `SUMMARY` surface in the list. Selecting the row
+pushes a native SwiftUI detail screen and renders the `DETAIL` surface. The entry becomes read only
+after that detail is visible. Both
+surfaces are immutable snapshots produced from the same headless payload and published template
+revision; navigation chrome remains native.
+
+Applications that own their navigation can embed the reusable views directly:
+
+```swift
+EngageMessageCenterListView(
+    sortOrder: .newestFirst,
+    onEntryTap: { entry in router.openMessage(entry.id) }
+)
+
+EngageMessageCenterDetailView(
+    entryId: entry.id,
+    onUnavailable: { router.closeMissingMessage() }
+)
+```
+
+These views contain no navigation controller or toolbar and share the same Inbox store, rendering
+cache, DivKit runtime, and action registry as the ready-made presentation.
+The list header presents the synchronized message and unread counts above a compact All/Unread
+segmented filter; bulk read mutations remain available through the headless Inbox API.
+The list provides the standard trailing swipe actions itself: delete, mark read, and mark unread.
+A full swipe never executes the destructive action directly. Selecting delete opens the native SwiftUI
+confirmation alert with cancel and destructive actions; only confirmation enqueues the Inbox mutation.
+
+For a custom UI, consume `Engage.messageCenter.inbox.unreadCount`, create a pager with
+`Engage.messageCenter.inbox.pager(pageSize: 20, sortOrder: .newestFirst)`, and call the inbox
+mutation methods directly. Sorting is server-side on `sentAt`; each order owns a separate cursor
+window. Rendering documents remain separate from inbox metadata so a custom list does not need to
+understand the DivKit payload until a message is opened.
 
 ## Modular integration
 

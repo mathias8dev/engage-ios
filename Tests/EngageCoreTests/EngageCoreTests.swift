@@ -17,6 +17,116 @@ final class EngageCoreTests: XCTestCase {
         XCTAssertEqual(engageStorageScope(config: first), engageStorageScope(config: first))
     }
 
+    func testEndpointChangesKeepTheSameApplicationStorageScope() {
+        let first = EngageConfig(
+            appKey: "eng_app_stable",
+            endpoint: URL(string: "https://edge-one.example.test/v1/")!
+        )
+        let second = EngageConfig(
+            appKey: "eng_app_stable",
+            endpoint: URL(string: "https://edge-two.example.test/v1/")!
+        )
+
+        XCTAssertEqual(engageStorageScope(config: first), engageStorageScope(config: second))
+        XCTAssertNotEqual(legacyEndpointStorageScope(config: first), legacyEndpointStorageScope(config: second))
+    }
+
+    func testEndpointScopedApplicationDirectoryMigratesOnce() throws {
+        let base = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let config = EngageConfig(
+            appKey: "eng_app_migrate",
+            endpoint: URL(string: "https://old-edge.example.test/v1/")!
+        )
+        let applications = base
+            .appendingPathComponent("io.engage.sdk", isDirectory: true)
+            .appendingPathComponent("applications", isDirectory: true)
+        let oldDirectory = applications
+            .appendingPathComponent(legacyEndpointStorageScope(config: config), isDirectory: true)
+        try FileManager.default.createDirectory(at: oldDirectory, withIntermediateDirectories: true)
+        try Data("installation-1".utf8).write(
+            to: oldDirectory.appendingPathComponent("core-state.json")
+        )
+
+        let stableDirectory = try engageStorageDirectory(config: config, base: base)
+
+        XCTAssertEqual(stableDirectory.lastPathComponent, engageStorageScope(config: config))
+        XCTAssertEqual(
+            try String(contentsOf: stableDirectory.appendingPathComponent("core-state.json"), encoding: .utf8),
+            "installation-1"
+        )
+        try FileManager.default.removeItem(at: stableDirectory.appendingPathComponent("core-state.json"))
+
+        _ = try engageStorageDirectory(config: config, base: base)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: stableDirectory.appendingPathComponent("core-state.json").path)
+        )
+    }
+
+    func testInterruptedEndpointMigrationRecoversTheLegacyKeychainScope() throws {
+        let base = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let config = EngageConfig(
+            appKey: "eng_app_interrupted_migration",
+            endpoint: URL(string: "https://old-edge.example.test/v1/")!
+        )
+        let legacyRoot = base.appendingPathComponent("io.engage.sdk", isDirectory: true)
+        let stableDirectory = legacyRoot
+            .appendingPathComponent("applications", isDirectory: true)
+            .appendingPathComponent(engageStorageScope(config: config), isDirectory: true)
+        try FileManager.default.createDirectory(at: stableDirectory, withIntermediateDirectories: true)
+        try Data("installation-1".utf8).write(
+            to: stableDirectory.appendingPathComponent("core-state.json")
+        )
+        let endpointScope = legacyEndpointStorageScope(config: config)
+        let migrationRecord = """
+        {"sourceScope":"\(endpointScope)","targetScope":"\(engageStorageScope(config: config))"}
+        """
+        try Data(migrationRecord.utf8).write(
+            to: stableDirectory.deletingLastPathComponent()
+                .appendingPathComponent(".endpoint-migration-v3-\(engageStorageScope(config: config)).json")
+        )
+
+        let recoveredDirectory = try engageStorageDirectory(config: config, base: base)
+
+        let recoveredScope = try String(
+            contentsOf: recoveredDirectory.appendingPathComponent(".endpoint-keychain-owner-v3"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(recoveredScope, endpointScope)
+    }
+
+    func testChangingEndpointWhileUpgradingPreservesPriorEndpointStorage() throws {
+        let base = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let oldConfig = EngageConfig(
+            appKey: "eng_app_simultaneous_upgrade",
+            endpoint: URL(string: "https://old-edge.example.test/v1/")!
+        )
+        let currentConfig = EngageConfig(
+            appKey: oldConfig.appKey,
+            endpoint: URL(string: "https://new-edge.example.test/v1/")!,
+            legacyEndpoints: [oldConfig.endpoint]
+        )
+        let applications = base
+            .appendingPathComponent("io.engage.sdk", isDirectory: true)
+            .appendingPathComponent("applications", isDirectory: true)
+        let oldDirectory = applications
+            .appendingPathComponent(legacyEndpointStorageScope(config: oldConfig), isDirectory: true)
+        try FileManager.default.createDirectory(at: oldDirectory, withIntermediateDirectories: true)
+        try Data("installation-before-upgrade".utf8).write(
+            to: oldDirectory.appendingPathComponent("core-state.json")
+        )
+
+        let stableDirectory = try engageStorageDirectory(config: currentConfig, base: base)
+
+        XCTAssertEqual(
+            try String(contentsOf: stableDirectory.appendingPathComponent("core-state.json"), encoding: .utf8),
+            "installation-before-upgrade"
+        )
+    }
+
     func testLegacyStorageMigratesToOnlyOneScopeAndCannotResurrectAfterWipe() async throws {
         let legacyRoot = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: legacyRoot) }

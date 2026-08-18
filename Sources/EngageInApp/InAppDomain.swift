@@ -49,15 +49,18 @@ struct InAppCampaign: Sendable {
     let defaultLocale: String
     let fallbackLocale: String?
     let variants: [InAppContentVariant]
+    let personalization: InAppPersonalizationContext
     let oneShot: Bool
 }
 
 struct ResolvedInAppContent: Sendable {
     let campaign: InAppCampaign
     let variant: InAppContentVariant
+    let payload: EngagePayload
+    let matchedTrigger: InAppTrigger?
 
     var instanceKey: String {
-        "\(campaign.key):\(campaign.revision):\(variant.id ?? variant.key ?? "")"
+        "\(campaign.key):\(campaign.revision):\(variant.id ?? variant.key ?? ""):\(matchedTrigger?.id ?? "")"
     }
 
     var publicContent: InAppContent {
@@ -66,7 +69,7 @@ struct ResolvedInAppContent: Sendable {
             messageId: campaign.messageId,
             variantId: variant.id ?? variant.key,
             type: variant.type,
-            payload: variant.payload,
+            payload: payload,
             presentation: variant.presentation
         )
     }
@@ -77,7 +80,7 @@ enum InAppRuntimeSignal: Sendable {
     case appBackgrounded
     case screenViewed(String)
     case screenCleared
-    case event(String)
+    case event(String, EngagePayload)
     case localDataWiped
 }
 
@@ -89,7 +92,12 @@ final class InAppEvaluator {
     private let now: @Sendable () -> Date
 
     private var campaigns: [InAppCampaign] = []
-    private var eligibleAt: [String: Date] = [:]
+    private struct Eligibility {
+        let date: Date
+        let trigger: InAppTrigger?
+        let event: EngagePayload
+    }
+    private var eligibility: [String: [String: Eligibility]] = [:]
     private var currentScreen: String?
     private(set) var isForeground = false
 
@@ -112,12 +120,24 @@ final class InAppEvaluator {
 
     func replaceCampaigns(_ values: [InAppCampaign]) {
         EngageLogger.debug("InApp.Evaluator", "campaigns replacing previous=\(campaigns.count) next=\(values.count)")
+        let previousRevisions = Dictionary(uniqueKeysWithValues: campaigns.map { ($0.key, $0.revision) })
         campaigns = values
         let keys = Set(values.map(\.key))
-        eligibleAt = eligibleAt.filter { keys.contains($0.key) }
+        eligibility = eligibility.filter { keys.contains($0.key) }
+        for campaign in values {
+            if let previous = previousRevisions[campaign.key], previous != campaign.revision {
+                eligibility[campaign.key] = nil
+            }
+            let triggerIDs = Set(campaign.triggers.map(\.id)).union([noTrigger])
+            eligibility[campaign.key] = eligibility[campaign.key]?.filter { triggerIDs.contains($0.key) }
+        }
         for campaign in values where campaign.triggers.isEmpty {
-            if eligibleAt[campaign.key] == nil {
-                eligibleAt[campaign.key] = campaign.availableAt ?? campaign.publishedAt
+            if eligibility[campaign.key]?[noTrigger] == nil {
+                eligibility[campaign.key, default: [:]][noTrigger] = Eligibility(
+                    date: campaign.availableAt ?? campaign.publishedAt,
+                    trigger: nil,
+                    event: [:]
+                )
             }
         }
         guard isForeground else { return }
@@ -127,13 +147,13 @@ final class InAppEvaluator {
                 markEligible(campaign, trigger: trigger, at: timestamp, onlyIfAbsent: true)
             }
         }
-        EngageLogger.info("InApp.Evaluator", "campaigns active count=\(campaigns.count) eligible=\(eligibleAt.count)")
+        EngageLogger.info("InApp.Evaluator", "campaigns active count=\(campaigns.count) eligible=\(eligibility.count)")
     }
 
     func resetContext() {
-        EngageLogger.info("InApp.Evaluator", "context resetting campaigns=\(campaigns.count) eligible=\(eligibleAt.count)")
+        EngageLogger.info("InApp.Evaluator", "context resetting campaigns=\(campaigns.count) eligible=\(eligibility.count)")
         campaigns = []
-        eligibleAt = [:]
+        eligibility = [:]
         currentScreen = nil
         isForeground = false
     }
@@ -161,6 +181,7 @@ final class InAppEvaluator {
         case let .screenViewed(key):
             type = "screen:\(key)"
             currentScreen = key
+            removeScreenEligibility(except: key)
             for campaign in campaigns {
                 for trigger in campaign.triggers where trigger.type == .screenView && trigger.screenName == key {
                     markEligible(campaign, trigger: trigger, at: timestamp)
@@ -169,14 +190,12 @@ final class InAppEvaluator {
         case .screenCleared:
             type = "screenCleared"
             currentScreen = nil
-            for campaign in campaigns where campaign.triggers.contains(where: { $0.type == .screenView }) {
-                eligibleAt[campaign.key] = nil
-            }
-        case let .event(name):
+            removeScreenEligibility(except: nil)
+        case let .event(name, properties):
             type = "event:\(name)"
             for campaign in campaigns {
                 for trigger in campaign.triggers where trigger.type == .event && trigger.eventName == name {
-                    markEligible(campaign, trigger: trigger, at: timestamp)
+                    markEligible(campaign, trigger: trigger, at: timestamp, event: properties)
                 }
             }
         case .localDataWiped:
@@ -185,22 +204,42 @@ final class InAppEvaluator {
         }
         EngageLogger.debug(
             "InApp.Evaluator",
-            "signal applied type=\(type) foreground=\(isForeground) eligible=\(eligibleAt.count)"
+            "signal applied type=\(type) foreground=\(isForeground) eligible=\(eligibility.count)"
         )
     }
 
     func candidates() -> [ResolvedInAppContent] {
         let timestamp = now()
         let values: [ResolvedInAppContent] = campaigns.compactMap { campaign -> ResolvedInAppContent? in
-            guard let eligible = eligibleAt[campaign.key],
-                  eligible <= timestamp,
+            guard let eligible = eligibility[campaign.key]?.values
+                .filter({ $0.date <= timestamp && contextMatches($0.trigger) })
+                .min(by: {
+                    if $0.date != $1.date { return $0.date < $1.date }
+                    return ($0.trigger?.id ?? "") < ($1.trigger?.id ?? "")
+                }),
                   isScheduled(campaign, at: timestamp),
                   withinLimits(campaign, at: timestamp) else { return nil }
-            let screenTriggers = campaign.triggers.filter { $0.type == .screenView }
-            if !screenTriggers.isEmpty && !screenTriggers.contains(where: { $0.screenName == currentScreen }) {
-                return nil
+            return selectVariant(campaign).map { variant in
+                let locale = bcp47Locale(locales().first) ?? "und"
+                let values = InAppPersonalization.values(
+                    base: campaign.personalization.values,
+                    event: eligible.event,
+                    appVersion: appVersion,
+                    locale: locale,
+                    screenName: currentScreen,
+                    sessionCount: history.sessionCount
+                )
+                return ResolvedInAppContent(
+                    campaign: campaign,
+                    variant: variant,
+                    payload: InAppPersonalization.resolve(
+                        payload: variant.payload,
+                        values: values,
+                        fallbacks: campaign.personalization.fallbacks
+                    ),
+                    matchedTrigger: eligible.trigger
+                )
             }
-            return selectVariant(campaign).map { ResolvedInAppContent(campaign: campaign, variant: $0) }
         }.sorted {
             if $0.campaign.priority != $1.campaign.priority {
                 return $0.campaign.priority > $1.campaign.priority
@@ -219,7 +258,7 @@ final class InAppEvaluator {
 
     func nextEvaluationDelayNanoseconds() -> UInt64? {
         let timestamp = now()
-        var boundaries = Array(eligibleAt.values)
+        var boundaries = eligibility.values.flatMap { $0.values.map(\.date) }
         for campaign in campaigns {
             boundaries += [campaign.startAt, campaign.endAt, campaign.availableAt, campaign.expiresAt].compactMap { $0 }
             if let minutes = campaign.displayPolicy.cooldownMinutes,
@@ -237,7 +276,7 @@ final class InAppEvaluator {
     }
 
     func consume(_ candidate: ResolvedInAppContent) {
-        eligibleAt[candidate.campaign.key] = nil
+        eligibility[candidate.campaign.key] = nil
         EngageLogger.debug("InApp.Evaluator", "candidate consumed messageId=\(candidate.campaign.messageId)")
     }
 
@@ -258,8 +297,7 @@ final class InAppEvaluator {
         guard campaigns.contains(where: {
             $0.key == candidate.campaign.key && $0.revision == candidate.campaign.revision
         }), isScheduled(candidate.campaign, at: now()) else { return false }
-        let screenTriggers = candidate.campaign.triggers.filter { $0.type == .screenView }
-        return screenTriggers.isEmpty || screenTriggers.contains(where: { $0.screenName == currentScreen })
+        return contextMatches(candidate.matchedTrigger)
     }
 
     private func isInitiallyEligible(_ trigger: InAppTrigger) -> Bool {
@@ -276,14 +314,32 @@ final class InAppEvaluator {
         _ campaign: InAppCampaign,
         trigger: InAppTrigger,
         at timestamp: Date,
-        onlyIfAbsent: Bool = false
+        onlyIfAbsent: Bool = false,
+        event: EngagePayload = [:]
     ) {
-        if onlyIfAbsent, eligibleAt[campaign.key] != nil { return }
-        eligibleAt[campaign.key] = timestamp.addingTimeInterval(Double(max(0, trigger.delaySeconds)))
+        if onlyIfAbsent, eligibility[campaign.key]?[trigger.id] != nil { return }
+        eligibility[campaign.key, default: [:]][trigger.id] = Eligibility(
+            date: timestamp.addingTimeInterval(Double(max(0, trigger.delaySeconds))),
+            trigger: trigger,
+            event: event
+        )
         EngageLogger.verbose(
             "InApp.Evaluator",
             "campaign eligible messageId=\(campaign.messageId) trigger=\(trigger.type) delaySeconds=\(trigger.delaySeconds)"
         )
+    }
+
+    private func removeScreenEligibility(except screenName: String?) {
+        for campaignKey in Array(eligibility.keys) {
+            eligibility[campaignKey] = eligibility[campaignKey]?.filter { _, value in
+                value.trigger?.type != .screenView || value.trigger?.screenName == screenName
+            }
+            if eligibility[campaignKey]?.isEmpty == true { eligibility[campaignKey] = nil }
+        }
+    }
+
+    private func contextMatches(_ trigger: InAppTrigger?) -> Bool {
+        trigger?.type != .screenView || trigger?.screenName == currentScreen
     }
 
     private func isScheduled(_ campaign: InAppCampaign, at timestamp: Date) -> Bool {
@@ -357,6 +413,12 @@ final class InAppEvaluator {
 private func normalizeLocale(_ value: String) -> String {
     value.replacingOccurrences(of: "_", with: "-").lowercased()
 }
+
+private func bcp47Locale(_ locale: Locale?) -> String? {
+    locale?.identifier.replacingOccurrences(of: "_", with: "-")
+}
+
+private let noTrigger = "__no_trigger__"
 
 private func utcDay(_ value: Date) -> String {
     let formatter = DateFormatter()

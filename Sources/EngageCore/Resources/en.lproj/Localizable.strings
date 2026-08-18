@@ -1,0 +1,3 @@
+"preference_center.title" = "Communication preferences";
+"preference_center.unavailable.title" = "No preferences yet";
+"preference_center.unavailable.body" = "This app hasn’t published any communication preferences yet. You can close this screen and continue using the app.";

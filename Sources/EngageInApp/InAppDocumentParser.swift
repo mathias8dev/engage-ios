@@ -53,6 +53,7 @@ enum InAppDocumentParser {
             defaultLocale: definition.string("defaultLocale") ?? "und",
             fallbackLocale: definition.string("fallbackLocale"),
             variants: variants,
+            personalization: parsePersonalization(payload),
             oneShot: false
         )
     }
@@ -93,6 +94,7 @@ enum InAppDocumentParser {
             defaultLocale: "und",
             fallbackLocale: nil,
             variants: [variant],
+            personalization: parsePersonalization(payload),
             oneShot: true
         )
     }
@@ -106,6 +108,16 @@ enum InAppDocumentParser {
             eventName: value.string("eventName"),
             minimumSessions: value.number("minimumSessions").map(Int.init),
             versionConstraint: value.string("versionConstraint")
+        )
+    }
+
+    private static func parsePersonalization(_ payload: EngagePayload) -> InAppPersonalizationContext {
+        guard let personalization = payload.object("personalization") else {
+            return InAppPersonalizationContext()
+        }
+        return InAppPersonalizationContext(
+            values: personalization.object("values") ?? [:],
+            fallbacks: personalization.object("fallbacks") ?? [:]
         )
     }
 

@@ -36,10 +36,64 @@ public struct InboxPagerState: Sendable {
         self.hasMore = hasMore; self.error = error
     }
 }
+public enum InboxSortOrder: String, Codable, Sendable {
+    case newestFirst = "NEWEST_FIRST"
+    case oldestFirst = "OLDEST_FIRST"
+}
 
 @_spi(Rendering) public struct InboxRenderingSnapshot: Sendable {
     public let entryId: InboxEntryId
-    public let renderer: String
+    public let renderer: InboxRenderer
     public let revision: Int64
-    public let document: EngagePayload
+    public let surfaces: [InboxRenderingSurface: EngagePayload]
+    public let expiresAt: Date?
+
+    public init(
+        entryId: InboxEntryId,
+        renderer: InboxRenderer,
+        revision: Int64,
+        surfaces: [InboxRenderingSurface: EngagePayload],
+        expiresAt: Date? = nil
+    ) {
+        self.entryId = entryId
+        self.renderer = renderer
+        self.revision = revision
+        self.surfaces = surfaces
+        self.expiresAt = expiresAt
+    }
+
+    public func surface(_ surface: InboxRenderingSurface) -> EngagePayload? {
+        surfaces[surface]
+    }
+}
+
+@_spi(Rendering) public struct MessageCenterPresentationState: Sendable {
+    public let lifecycleRevision: Int64
+    public let generation: Int64
+    public let isEnabled: Bool
+    public let entryIds: Set<InboxEntryId>
+    public let deletedEntryIds: Set<InboxEntryId>
+
+    public init(
+        lifecycleRevision: Int64,
+        generation: Int64,
+        isEnabled: Bool,
+        entryIds: Set<InboxEntryId>,
+        deletedEntryIds: Set<InboxEntryId> = []
+    ) {
+        self.lifecycleRevision = lifecycleRevision
+        self.generation = generation
+        self.isEnabled = isEnabled
+        self.entryIds = entryIds
+        self.deletedEntryIds = deletedEntryIds
+    }
+}
+
+@_spi(Rendering) public enum InboxRenderer: String, Codable, Sendable {
+    case divKit = "DIVKIT"
+}
+
+@_spi(Rendering) public enum InboxRenderingSurface: String, Codable, CaseIterable, Sendable {
+    case summary = "SUMMARY"
+    case detail = "DETAIL"
 }

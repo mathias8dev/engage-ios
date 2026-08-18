@@ -1,0 +1,7 @@
+"message_center_filter_all" = "All";
+"message_center_filter_unread" = "Unread";
+"message_center_header_summary" = "%1$@ · %2$@";
+"message_center_message_count_one" = "%ld message";
+"message_center_message_count_other" = "%ld messages";
+"message_center_unread_count_one" = "%ld unread";
+"message_center_unread_count_other" = "%ld unread";

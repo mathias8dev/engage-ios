@@ -145,9 +145,7 @@ actor CorePersistence {
         secureStore = SecureBlobStore(
             directory: directory,
             service: "io.engage.sdk.credentials.\(directory.lastPathComponent)",
-            legacyService: FileManager.default.fileExists(
-                atPath: directory.appendingPathComponent(legacyKeychainOwnerMarker).path
-            ) ? "io.engage.sdk.credentials" : nil,
+            legacyService: legacyKeychainService(for: directory),
             backend: secureStorageBackend
         )
 
@@ -675,7 +673,14 @@ private struct SecureStoreError: Error { let status: OSStatus }
 #endif
 
 private let legacyStorageMigrationLock = NSLock()
+private let endpointStorageMigrationLock = NSLock()
 private let legacyKeychainOwnerMarker = ".legacy-keychain-owner-v2"
+private let endpointKeychainOwnerMarker = ".endpoint-keychain-owner-v3"
+
+private struct EndpointStorageMigrationRecord: Codable {
+    let sourceScope: String
+    let targetScope: String
+}
 
 private struct LegacyStorageMigrationRecord: Codable {
     let ownerScope: String
@@ -690,6 +695,8 @@ private struct LegacyStorageItem {
 
 private enum LegacyStorageMigrationError: Error {
     case invalidRecord
+    case conflictingEndpointStorage
+    case missingEndpointStorage
 }
 
 /// Claims the pre-isolation storage for the first app configuration and migrates every item once.
@@ -792,24 +799,112 @@ func engageStorageDirectory(config: EngageConfig) throws -> URL {
     let manager = FileManager.default
     let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         ?? manager.temporaryDirectory
+    return try engageStorageDirectory(config: config, base: base)
+}
+
+func engageStorageDirectory(config: EngageConfig, base: URL) throws -> URL {
+    let manager = FileManager.default
     let legacyRoot = base.appendingPathComponent("io.engage.sdk", isDirectory: true)
-    let directory = legacyRoot
-        .appendingPathComponent("applications", isDirectory: true)
-        .appendingPathComponent(engageStorageScope(config: config), isDirectory: true)
+    let applications = legacyRoot.appendingPathComponent("applications", isDirectory: true)
+    let targetScope = engageStorageScope(config: config)
+    let directory = applications.appendingPathComponent(targetScope, isDirectory: true)
+    let endpointScopes = ([config.endpoint] + config.legacyEndpoints)
+        .map { legacyEndpointStorageScope(appKey: config.appKey, endpoint: $0) }
+        .reduce(into: [String]()) { scopes, scope in
+            if !scopes.contains(scope) { scopes.append(scope) }
+        }
+    try migrateEndpointStorage(
+        applications: applications,
+        targetDirectory: directory,
+        targetScope: targetScope,
+        sourceScopes: endpointScopes
+    )
     try migrateLegacyStorage(
         from: legacyRoot,
         to: directory,
-        scope: engageStorageScope(config: config)
+        scope: targetScope
     )
     return directory
 }
 
+private func migrateEndpointStorage(
+    applications: URL,
+    targetDirectory: URL,
+    targetScope: String,
+    sourceScopes: [String]
+) throws {
+    endpointStorageMigrationLock.lock()
+    defer { endpointStorageMigrationLock.unlock() }
+
+    let manager = FileManager.default
+    try manager.createDirectory(at: applications, withIntermediateDirectories: true)
+    let recordURL = applications.appendingPathComponent(".endpoint-migration-v3-\(targetScope).json")
+    var record: EndpointStorageMigrationRecord?
+    if manager.fileExists(atPath: recordURL.path) {
+        let data = try Data(contentsOf: recordURL)
+        guard let decoded = try? JSONDecoder().decode(EndpointStorageMigrationRecord.self, from: data),
+              decoded.targetScope == targetScope else {
+            throw LegacyStorageMigrationError.invalidRecord
+        }
+        record = decoded
+    } else if !manager.fileExists(atPath: targetDirectory.path),
+              let sourceScope = sourceScopes.first(where: {
+                  manager.fileExists(atPath: applications.appendingPathComponent($0).path)
+              }) {
+        let created = EndpointStorageMigrationRecord(sourceScope: sourceScope, targetScope: targetScope)
+        try JSONEncoder().encode(created).write(to: recordURL, options: [.atomic])
+        record = created
+    }
+
+    guard let record else { return }
+    let sourceDirectory = applications.appendingPathComponent(record.sourceScope, isDirectory: true)
+    let sourceExists = manager.fileExists(atPath: sourceDirectory.path)
+    let targetExists = manager.fileExists(atPath: targetDirectory.path)
+    if sourceExists && !targetExists {
+        try manager.moveItem(at: sourceDirectory, to: targetDirectory)
+    } else if sourceExists && targetExists {
+        throw LegacyStorageMigrationError.conflictingEndpointStorage
+    } else if !targetExists {
+        throw LegacyStorageMigrationError.missingEndpointStorage
+    }
+
+    try Data(record.sourceScope.utf8).write(
+        to: targetDirectory.appendingPathComponent(endpointKeychainOwnerMarker),
+        options: [.atomic]
+    )
+    try manager.removeItem(at: recordURL)
+}
+
 func engageStorageScope(config: EngageConfig) -> String {
     var hash: UInt64 = 0xcbf29ce484222325
-    "\(config.endpoint.absoluteString)\u{0}\(config.appKey)".utf8.forEach {
+    config.appKey.utf8.forEach {
         hash = (hash ^ UInt64($0)) &* 0x100000001b3
     }
     return String(hash, radix: 16).leftPadding(toLength: 16, withPad: "0")
+}
+
+func legacyEndpointStorageScope(config: EngageConfig) -> String {
+    legacyEndpointStorageScope(appKey: config.appKey, endpoint: config.endpoint)
+}
+
+private func legacyEndpointStorageScope(appKey: String, endpoint: URL) -> String {
+    var hash: UInt64 = 0xcbf29ce484222325
+    "\(endpoint.absoluteString)\u{0}\(appKey)".utf8.forEach {
+        hash = (hash ^ UInt64($0)) &* 0x100000001b3
+    }
+    return String(hash, radix: 16).leftPadding(toLength: 16, withPad: "0")
+}
+
+private func legacyKeychainService(for directory: URL) -> String? {
+    let endpointOwner = directory.appendingPathComponent(endpointKeychainOwnerMarker)
+    if let data = try? Data(contentsOf: endpointOwner),
+       let scope = String(data: data, encoding: .utf8),
+       !scope.isEmpty {
+        return "io.engage.sdk.credentials.\(scope)"
+    }
+    return FileManager.default.fileExists(
+        atPath: directory.appendingPathComponent(legacyKeychainOwnerMarker).path
+    ) ? "io.engage.sdk.credentials" : nil
 }
 
 private extension String {
