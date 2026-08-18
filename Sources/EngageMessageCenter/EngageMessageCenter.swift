@@ -114,10 +114,13 @@ public final class Inbox: @unchecked Sendable {
         updateRuntimeState()
     }
 
-    public func pager(pageSize: Int = 20) -> InboxPager {
+    public func pager(pageSize: Int = 20, sortOrder: InboxSortOrder = .newestFirst) -> InboxPager {
         precondition((1...100).contains(pageSize), "Inbox pageSize must be between 1 and 100")
-        let pager = InboxPager(inbox: self, pageSize: pageSize)
-        EngageLogger.info("MessageCenter.Inbox", "pager creating id=\(pager.id) pageSize=\(pageSize)")
+        let pager = InboxPager(inbox: self, pageSize: pageSize, sortOrder: sortOrder)
+        EngageLogger.info(
+            "MessageCenter.Inbox",
+            "pager creating id=\(pager.id) pageSize=\(pageSize) sortOrder=\(sortOrder.rawValue)"
+        )
         registryLock.lock()
         pagers[pager.id] = WeakPager(pager)
         registryLock.unlock()
@@ -148,8 +151,13 @@ public final class Inbox: @unchecked Sendable {
         await mutate("DELETE", id: id, when: true, wasUnread: entry.map { $0.readAt == nil })
     }
 
-    fileprivate func fetchPage(cursor: String?, pageSize: Int, generation: Int64) async throws -> RemotePage {
-        let request = PageRequest(generation: generation, pageSize: pageSize, cursor: cursor)
+    fileprivate func fetchPage(
+        cursor: String?,
+        pageSize: Int,
+        generation: Int64,
+        sortOrder: InboxSortOrder
+    ) async throws -> RemotePage {
+        let request = PageRequest(generation: generation, pageSize: pageSize, cursor: cursor, sortOrder: sortOrder)
         EngageLogger.debug(
             "MessageCenter.Inbox",
             "page fetch requested generation=\(generation) pageSize=\(pageSize) hasCursor=\(cursor != nil)"
@@ -162,7 +170,7 @@ public final class Inbox: @unchecked Sendable {
             let response = try await context.authorizedRequest(
                 method: "GET",
                 path: "sdk/inbox",
-                query: ["pageSize": String(pageSize)].merging(
+                query: ["pageSize": String(pageSize), "sortOrder": sortOrder.rawValue].merging(
                     cursor.map { ["cursor": $0] } ?? [:],
                     uniquingKeysWith: { _, new in new }
                 )
@@ -183,7 +191,8 @@ public final class Inbox: @unchecked Sendable {
                 entries: page.entries,
                 nextCursor: page.nextCursor,
                 hasMore: page.hasMore,
-                unreadCount: page.unreadCount
+                unreadCount: page.unreadCount,
+                sortOrder: sortOrder
             ) else { throw inboxError(.localPersistence, "Inbox page could not be persisted", retryable: true) }
             return page
         }
@@ -396,7 +405,9 @@ public final class Inbox: @unchecked Sendable {
         EngageLogger.info("MessageCenter.Inbox", "pager unregistered id=\(pager.id)")
     }
 
-    fileprivate func cachedWindow(pageSize: Int) -> CachedInboxWindow { store.cachedWindow(pageSize: pageSize) }
+    fileprivate func cachedWindow(pageSize: Int, sortOrder: InboxSortOrder) -> CachedInboxWindow {
+        store.cachedWindow(pageSize: pageSize, sortOrder: sortOrder)
+    }
     fileprivate func projectedEntries(ids: [String]) -> [InboxEntry] {
         guard enabled.value else { return [] }
         return store.entries(ids: ids)
@@ -463,7 +474,12 @@ public final class Inbox: @unchecked Sendable {
     private func refreshUnreadCount() async {
         EngageLogger.debug("MessageCenter.Inbox", "unread refresh started")
         do {
-            _ = try await fetchPage(cursor: nil, pageSize: 20, generation: context.generation.value)
+            _ = try await fetchPage(
+                cursor: nil,
+                pageSize: 20,
+                generation: context.generation.value,
+                sortOrder: .newestFirst
+            )
             if globalError.value?.isRetryable == true { globalError.set(nil) }
             EngageLogger.info("MessageCenter.Inbox", "unread refresh completed unread=\(unreadCount.value)")
         } catch {
@@ -565,6 +581,7 @@ public final class InboxPager: @unchecked Sendable {
     fileprivate let id = UUID()
     private weak var inbox: Inbox?
     private let pageSize: Int
+    private let sortOrder: InboxSortOrder
     private let lock = NSLock()
     private let commands = PagerCommandGate()
     private var window: PagerWindow
@@ -573,9 +590,10 @@ public final class InboxPager: @unchecked Sendable {
 
     public let state = EngageState(InboxPagerState())
 
-    fileprivate init(inbox: Inbox, pageSize: Int) {
+    fileprivate init(inbox: Inbox, pageSize: Int, sortOrder: InboxSortOrder) {
         self.inbox = inbox
         self.pageSize = pageSize
+        self.sortOrder = sortOrder
         window = PagerWindow(generation: inbox.context.generation.value)
         EngageLogger.debug("MessageCenter.Pager", "created id=\(id) pageSize=\(pageSize)")
     }
@@ -662,7 +680,12 @@ public final class InboxPager: @unchecked Sendable {
             repeat {
                 let cursorKey = cursor ?? "\u{0}first"
                 guard visited.insert(cursorKey).inserted else { throw invalidResponse("Inbox cursor loop detected") }
-                let page = try await inbox.fetchPage(cursor: cursor, pageSize: pageSize, generation: generation)
+                let page = try await inbox.fetchPage(
+                    cursor: cursor,
+                    pageSize: pageSize,
+                    generation: generation,
+                    sortOrder: sortOrder
+                )
                 for entry in page.entries where !ids.contains(entry.id.value) { ids.append(entry.id.value) }
                 cursor = page.nextCursor
                 hasMore = page.hasMore
@@ -700,7 +723,12 @@ public final class InboxPager: @unchecked Sendable {
         setWindow(current.with(refreshing: false, loadingMore: true, error: nil))
         EngageLogger.debug("MessageCenter.Pager", "load next started id=\(id) generation=\(generation)")
         do {
-            let page = try await inbox.fetchPage(cursor: cursor, pageSize: pageSize, generation: generation)
+            let page = try await inbox.fetchPage(
+                cursor: cursor,
+                pageSize: pageSize,
+                generation: generation,
+                sortOrder: sortOrder
+            )
             guard inbox.context.generation.value == generation else {
                 throw inboxError(.generationChanged, "Inbox generation changed", retryable: true)
             }
@@ -721,7 +749,7 @@ public final class InboxPager: @unchecked Sendable {
 
     private func restoreCachedWindow() {
         guard let inbox, isOpen else { return }
-        let cached = inbox.cachedWindow(pageSize: pageSize)
+        let cached = inbox.cachedWindow(pageSize: pageSize, sortOrder: sortOrder)
         EngageLogger.debug("MessageCenter.Pager", "cache restored id=\(id) entries=\(cached.entryIds.count) hasMore=\(cached.hasMore)")
         setWindow(PagerWindow(
             generation: inbox.context.generation.value,
@@ -824,6 +852,7 @@ private struct PageRequest: Hashable, Sendable {
     let generation: Int64
     let pageSize: Int
     let cursor: String?
+    let sortOrder: InboxSortOrder
 }
 
 private actor PageTaskRegistry {

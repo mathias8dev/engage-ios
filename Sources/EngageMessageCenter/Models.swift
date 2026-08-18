@@ -36,6 +36,10 @@ public struct InboxPagerState: Sendable {
         self.hasMore = hasMore; self.error = error
     }
 }
+public enum InboxSortOrder: String, Codable, Sendable {
+    case newestFirst = "NEWEST_FIRST"
+    case oldestFirst = "OLDEST_FIRST"
+}
 
 @_spi(Rendering) public struct InboxRenderingSnapshot: Sendable {
     public let entryId: InboxEntryId

@@ -16,3 +16,7 @@ func shouldInvalidateMessageCenterDetail(
 func isMessageCenterContentVisible(visibleArea: Double, totalArea: Double) -> Bool {
     totalArea > 0 && visibleArea / totalArea >= 0.5
 }
+
+func shouldApplyMessageCenterNativeChrome(hasPublishedRendering: Bool) -> Bool {
+    !hasPublishedRendering
+}

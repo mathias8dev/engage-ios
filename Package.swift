@@ -53,7 +53,8 @@ let package = Package(
                 "EngageCore",
                 "EngageMessageCenter",
                 .product(name: "DivKit", package: "divkit-ios", condition: .when(platforms: [.iOS])),
-            ]
+            ],
+            resources: [.process("Resources")]
         ),
         .testTarget(name: "EngageCoreTests", dependencies: ["EngageCore"]),
         .testTarget(name: "EngageSDKTests", dependencies: ["EngageSDK"]),

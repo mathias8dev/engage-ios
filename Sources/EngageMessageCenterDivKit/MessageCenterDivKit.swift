@@ -24,6 +24,83 @@ public struct MessageCenterViewError: Error, Sendable {
     }
 }
 
+/// Material 3 color roles consumed by the navigation-independent Message Center views.
+public struct MessageCenterMaterialTheme {
+    public let primary: Color
+    public let onPrimary: Color
+    public let primaryContainer: Color
+    public let surface: Color
+    public let surfaceContainerLow: Color
+    public let surfaceContainer: Color
+    public let onSurface: Color
+    public let onSurfaceVariant: Color
+    public let outlineVariant: Color
+    public let error: Color
+    public let onError: Color
+
+    public init(
+        primary: Color,
+        onPrimary: Color,
+        primaryContainer: Color,
+        surface: Color,
+        surfaceContainerLow: Color,
+        surfaceContainer: Color,
+        onSurface: Color,
+        onSurfaceVariant: Color,
+        outlineVariant: Color,
+        error: Color = Color(uiColor: .systemRed),
+        onError: Color = .white
+    ) {
+        self.primary = primary
+        self.onPrimary = onPrimary
+        self.primaryContainer = primaryContainer
+        self.surface = surface
+        self.surfaceContainerLow = surfaceContainerLow
+        self.surfaceContainer = surfaceContainer
+        self.onSurface = onSurface
+        self.onSurfaceVariant = onSurfaceVariant
+        self.outlineVariant = outlineVariant
+        self.error = error
+        self.onError = onError
+    }
+
+    public static let system = MessageCenterMaterialTheme(
+        primary: .accentColor,
+        onPrimary: .white,
+        primaryContainer: Color.accentColor.opacity(0.1),
+        surface: Color(uiColor: .systemGroupedBackground),
+        surfaceContainerLow: Color(uiColor: .systemBackground),
+        surfaceContainer: Color(uiColor: .secondarySystemGroupedBackground),
+        onSurface: Color(uiColor: .label),
+        onSurfaceVariant: Color(uiColor: .secondaryLabel),
+        outlineVariant: Color(uiColor: .separator),
+        error: Color(uiColor: .systemRed),
+        onError: .white
+    )
+}
+
+/// Host-owned layout tokens for the navigation-independent Message Center views.
+public struct MessageCenterViewLayout {
+    public let horizontalPadding: CGFloat
+    public let itemSpacing: CGFloat
+    public let itemCornerRadius: CGFloat
+
+    public init(
+        horizontalPadding: CGFloat = 16,
+        itemSpacing: CGFloat = 12,
+        itemCornerRadius: CGFloat = 20
+    ) {
+        precondition(horizontalPadding >= 0, "horizontalPadding must be positive")
+        precondition(itemSpacing >= 0, "itemSpacing must be positive")
+        precondition(itemCornerRadius >= 0, "itemCornerRadius must be positive")
+        self.horizontalPadding = horizontalPadding
+        self.itemSpacing = itemSpacing
+        self.itemCornerRadius = itemCornerRadius
+    }
+
+    public static let `default` = MessageCenterViewLayout()
+}
+
 public extension MessageCenter {
     @MainActor func display(entryId: InboxEntryId? = nil, from presenter: UIViewController? = nil) {
         EngageLogger.info(
@@ -129,25 +206,38 @@ public struct EngageMessageCenterView: View {
 /// Engage-rendered Inbox summaries without a route or navigation chrome.
 public struct EngageMessageCenterListView: View {
     private let messageCenter: MessageCenter
+    private let materialTheme: MessageCenterMaterialTheme
+    private let layout: MessageCenterViewLayout
     private let onEntryTap: (InboxEntry) -> Void
     private let onError: ((MessageCenterViewError) -> Void)?
     @State private var state = InboxPagerState()
     @State private var renderings: [InboxEntryId: InboxRenderingSnapshot] = [:]
     @State private var unreadCount = 0
     @State private var filter = InboxViewFilter.all
+    @State private var pendingDeleteEntryId: InboxEntryId?
     @StateObject private var pagerOwner: MessageCenterPagerOwner
+    @Environment(\.locale) private var locale
     private var pager: InboxPager { pagerOwner.pager }
 
     public init(
         messageCenter: MessageCenter = MessageCenterModule.shared,
+        sortOrder: InboxSortOrder = .newestFirst,
+        materialTheme: MessageCenterMaterialTheme = .system,
+        layout: MessageCenterViewLayout = .default,
         onEntryTap: @escaping (InboxEntry) -> Void,
         onError: ((MessageCenterViewError) -> Void)? = nil
     ) {
         self.messageCenter = messageCenter
+        self.materialTheme = materialTheme
+        self.layout = layout
         self.onEntryTap = onEntryTap
         self.onError = onError
         _pagerOwner = StateObject(
-            wrappedValue: MessageCenterPagerOwner(inbox: messageCenter.inbox, pageSize: 20)
+            wrappedValue: MessageCenterPagerOwner(
+                inbox: messageCenter.inbox,
+                pageSize: 20,
+                sortOrder: sortOrder
+            )
         )
     }
 
@@ -156,7 +246,21 @@ public struct EngageMessageCenterListView: View {
             if !state.entries.isEmpty { filterBar }
             content
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(materialTheme.surface)
+        .foregroundStyle(materialTheme.onSurface)
+        .tint(materialTheme.primary)
+        .alert("Delete this message?", isPresented: deleteConfirmationPresented) {
+            Button("Cancel", role: .cancel) {
+                pendingDeleteEntryId = nil
+            }
+            Button("Delete", role: .destructive) {
+                guard let entryId = pendingDeleteEntryId else { return }
+                pendingDeleteEntryId = nil
+                Task { await messageCenter.inbox.delete(entryId) }
+            }
+        } message: {
+            Text("It will be removed from your Message Center on every synchronized device.")
+        }
         .task {
             for await value in pager.state.updates {
                 guard !Task.isCancelled else { return }
@@ -208,20 +312,22 @@ public struct EngageMessageCenterListView: View {
     }
 
     private var filterBar: some View {
-        HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(messageCenterHeaderSummary(state.entries.count, effectiveUnreadCount, locale: locale))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(materialTheme.onSurfaceVariant)
             Picker("Message filter", selection: $filter) {
-                ForEach(InboxViewFilter.allCases) { option in Text(option.label).tag(option) }
+                ForEach(InboxViewFilter.allCases) { option in
+                    Text(option.label(locale: locale)).tag(option)
+                }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 190)
-            Spacer(minLength: 0)
-            if effectiveUnreadCount > 0 {
-                Button("Mark all read") { Task { await messageCenter.inbox.markAllRead() } }
-                    .font(.subheadline.weight(.semibold))
-            }
+            .controlSize(.small)
+            .frame(width: 160)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, layout.horizontalPadding)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
     }
 
     @ViewBuilder private var content: some View {
@@ -233,6 +339,7 @@ public struct EngageMessageCenterListView: View {
                 title: "Messages unavailable",
                 message: "We couldn't refresh your messages. Try again.",
                 action: "Retry",
+                materialTheme: materialTheme,
                 onAction: { Task { await pager.refresh() } }
             )
         } else if state.entries.isEmpty {
@@ -241,6 +348,7 @@ public struct EngageMessageCenterListView: View {
                 title: "You're all caught up",
                 message: "Important updates and messages will appear here.",
                 action: "Refresh",
+                materialTheme: materialTheme,
                 onAction: { Task { await pager.refresh() } }
             )
         } else if visibleEntries.isEmpty, filter == .unread, !state.hasMore, !state.isLoadingMore {
@@ -249,6 +357,7 @@ public struct EngageMessageCenterListView: View {
                 title: "No unread messages",
                 message: "Everything in your inbox has been read.",
                 action: "Refresh",
+                materialTheme: materialTheme,
                 onAction: { Task { await pager.refresh() } }
             )
         } else if visibleEntries.isEmpty {
@@ -258,33 +367,43 @@ public struct EngageMessageCenterListView: View {
                 if state.error != nil {
                     Text("Some messages may be out of date. Pull to refresh.")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .listRowBackground(Color.accentColor.opacity(0.08))
+                        .foregroundStyle(materialTheme.onSurfaceVariant)
+                        .listRowBackground(materialTheme.primaryContainer)
                 }
                 ForEach(visibleEntries) { entry in
                     MessageCenterCard(
                         entry: entry,
                         rendering: renderings[entry.id],
                         messageCenter: messageCenter,
+                        materialTheme: materialTheme,
+                        layout: layout,
                         onOpen: { onEntryTap(entry) }
                     )
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    .listRowInsets(
+                        EdgeInsets(
+                            top: layout.itemSpacing / 2,
+                            leading: layout.horizontalPadding,
+                            bottom: layout.itemSpacing / 2,
+                            trailing: layout.horizontalPadding
+                        )
+                    )
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
-                    .swipeActions(edge: .trailing) {
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
-                            Task { await messageCenter.inbox.delete(entry.id) }
+                            pendingDeleteEntryId = entry.id
                         } label: { Label("Delete", systemImage: "trash") }
+                        .tint(materialTheme.error)
                         if entry.readAt == nil {
                             Button { Task { await messageCenter.inbox.markRead(entry.id) } } label: {
                                 Label("Mark read", systemImage: "envelope.open")
                             }
-                            .tint(.accentColor)
+                            .tint(materialTheme.primary)
                         } else {
                             Button { Task { await messageCenter.inbox.markUnread(entry.id) } } label: {
                                 Label("Mark unread", systemImage: "envelope.badge")
                             }
-                            .tint(.accentColor)
+                            .tint(materialTheme.primary)
                         }
                     }
                     if entry.id == visibleEntries.last?.id, state.hasMore {
@@ -306,6 +425,14 @@ public struct EngageMessageCenterListView: View {
         filter == .all ? state.entries : state.entries.filter { $0.readAt == nil }
     }
     private var effectiveUnreadCount: Int { max(unreadCount, state.entries.filter { $0.readAt == nil }.count) }
+    private var deleteConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingDeleteEntryId != nil },
+            set: { isPresented in
+                if !isPresented { pendingDeleteEntryId = nil }
+            }
+        )
+    }
     private var unreadPagingKey: String {
         "\(filter.rawValue):\(state.entries.count):\(state.hasMore):\(state.isLoadingMore)"
     }
@@ -314,8 +441,8 @@ public struct EngageMessageCenterListView: View {
 private final class MessageCenterPagerOwner: ObservableObject {
     let pager: InboxPager
 
-    init(inbox: Inbox, pageSize: Int) {
-        pager = inbox.pager(pageSize: pageSize)
+    init(inbox: Inbox, pageSize: Int, sortOrder: InboxSortOrder) {
+        pager = inbox.pager(pageSize: pageSize, sortOrder: sortOrder)
     }
 
     deinit { pager.close() }
@@ -325,6 +452,7 @@ private final class MessageCenterPagerOwner: ObservableObject {
 public struct EngageMessageCenterDetailView: View {
     private let entryId: InboxEntryId
     private let messageCenter: MessageCenter
+    private let materialTheme: MessageCenterMaterialTheme
     private let onUnavailable: (() -> Void)?
     private let onError: ((MessageCenterViewError) -> Void)?
     private let initialLifecycleRevision: Int64
@@ -337,11 +465,13 @@ public struct EngageMessageCenterDetailView: View {
     public init(
         entryId: InboxEntryId,
         messageCenter: MessageCenter = MessageCenterModule.shared,
+        materialTheme: MessageCenterMaterialTheme = .system,
         onUnavailable: (() -> Void)? = nil,
         onError: ((MessageCenterViewError) -> Void)? = nil
     ) {
         self.entryId = entryId
         self.messageCenter = messageCenter
+        self.materialTheme = materialTheme
         self.onUnavailable = onUnavailable
         self.onError = onError
         let presentation = messageCenter.presentationState.value
@@ -368,11 +498,13 @@ public struct EngageMessageCenterDetailView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if unavailable {
                 Text("Message unavailable")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(materialTheme.onSurfaceVariant)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(uiColor: .systemBackground))
+        .background(materialTheme.surface)
+        .foregroundStyle(materialTheme.onSurface)
+        .tint(materialTheme.primary)
         .task(id: entryId) { await resolve() }
         .task(id: entryId) { await observePresentation() }
         .task(id: snapshot?.expiresAt) { await invalidateAtExpiry() }
@@ -481,16 +613,82 @@ private enum InboxViewFilter: String, CaseIterable, Identifiable {
     case all
     case unread
     var id: Self { self }
-    var label: String { self == .all ? "All" : "Unread" }
+    func label(locale: Locale) -> String {
+        messageCenterLocalized(
+            self == .all ? "message_center_filter_all" : "message_center_filter_unread",
+            locale: locale
+        )
+    }
+}
+
+internal func messageCenterHeaderSummary(_ messageCount: Int, _ unreadCount: Int, locale: Locale) -> String {
+    let messages = messageCenterLocalized(
+        messageCount == 1 ? "message_center_message_count_one" : "message_center_message_count_other",
+        locale: locale
+    )
+    let unread = messageCenterLocalized(
+        unreadCount == 1 ? "message_center_unread_count_one" : "message_center_unread_count_other",
+        locale: locale
+    )
+    return String(
+        format: messageCenterLocalized("message_center_header_summary", locale: locale),
+        locale: locale,
+        String(format: messages, locale: locale, messageCount),
+        String(format: unread, locale: locale, unreadCount)
+    )
+}
+
+private func messageCenterLocalized(_ key: String, locale: Locale) -> String {
+    let identifiers = [locale.identifier.replacingOccurrences(of: "_", with: "-"), locale.languageCode]
+        .compactMap { $0 }
+    for identifier in identifiers {
+        let language = identifier.split(separator: "-").first.map(String.init) ?? identifier
+        if let url = Bundle.module.url(forResource: language, withExtension: "lproj"),
+           let bundle = Bundle(url: url) {
+            return bundle.localizedString(forKey: key, value: key, table: nil)
+        }
+    }
+    return Bundle.module.localizedString(forKey: key, value: key, table: nil)
 }
 
 private struct MessageCenterCard: View {
     let entry: InboxEntry
     let rendering: InboxRenderingSnapshot?
     let messageCenter: MessageCenter
+    let materialTheme: MessageCenterMaterialTheme
+    let layout: MessageCenterViewLayout
     let onOpen: () -> Void
 
     var body: some View {
+        Group {
+            if shouldApplyMessageCenterNativeChrome(hasPublishedRendering: rendering != nil) {
+                cardContent
+                    .background(
+                        entry.readAt == nil
+                            ? materialTheme.surfaceContainerLow
+                            : materialTheme.surfaceContainer
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: layout.itemCornerRadius, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: layout.itemCornerRadius, style: .continuous)
+                            .stroke(materialTheme.outlineVariant.opacity(0.45), lineWidth: 0.5)
+                    }
+                    .shadow(color: Color.black.opacity(0.06), radius: 8, y: 4)
+                    .contentShape(RoundedRectangle(cornerRadius: layout.itemCornerRadius, style: .continuous))
+            } else {
+                cardContent.contentShape(Rectangle())
+            }
+        }
+        .overlay(alignment: .leading) {
+            if entry.readAt == nil {
+                RoundedRectangle(cornerRadius: 2).fill(materialTheme.primary).frame(width: 4)
+            }
+        }
+        .onTapGesture(perform: onOpen)
+        .accessibilityValue(entry.readAt == nil ? "Unread" : "Read")
+    }
+
+    private var cardContent: some View {
         ZStack(alignment: .topTrailing) {
             Group {
                 if let rendering {
@@ -503,30 +701,15 @@ private struct MessageCenterCard: View {
                     )
                 } else {
                     Text(entry.key)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(materialTheme.onSurfaceVariant)
                         .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
                         .padding(16)
                 }
             }
             if entry.readAt == nil {
-                Circle().fill(Color.accentColor).frame(width: 8, height: 8).padding(12).accessibilityHidden(true)
+                Circle().fill(materialTheme.primary).frame(width: 8, height: 8).padding(12).accessibilityHidden(true)
             }
         }
-        .background(entry.readAt == nil ? Color(uiColor: .systemBackground) : Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(alignment: .leading) {
-            if entry.readAt == nil {
-                RoundedRectangle(cornerRadius: 2).fill(Color.accentColor).frame(width: 4)
-            }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Color(uiColor: .separator).opacity(0.45), lineWidth: 0.5)
-        }
-        .shadow(color: Color.black.opacity(0.06), radius: 8, y: 4)
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onTapGesture(perform: onOpen)
-        .accessibilityValue(entry.readAt == nil ? "Unread" : "Read")
     }
 }
 
@@ -535,18 +718,19 @@ private struct MessageCenterEmptyView: View {
     let title: String
     let message: String
     let action: String
+    let materialTheme: MessageCenterMaterialTheme
     let onAction: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                Circle().fill(Color.accentColor.opacity(0.1)).frame(width: 112, height: 112)
-                Image(systemName: symbol).font(.system(size: 46)).foregroundStyle(Color.accentColor)
+                Circle().fill(materialTheme.primaryContainer).frame(width: 112, height: 112)
+                Image(systemName: symbol).font(.system(size: 46)).foregroundStyle(materialTheme.primary)
             }
             Text(title).font(.title3.weight(.bold)).padding(.top, 24)
             Text(message)
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(materialTheme.onSurfaceVariant)
                 .multilineTextAlignment(.center)
                 .padding(.top, 8)
                 .frame(maxWidth: 310)

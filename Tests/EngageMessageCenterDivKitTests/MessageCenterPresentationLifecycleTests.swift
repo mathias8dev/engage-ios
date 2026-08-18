@@ -5,6 +5,17 @@ import XCTest
 final class MessageCenterPresentationLifecycleTests: XCTestCase {
     private let entryId = InboxEntryId("entry-1")
 
+    func testHeaderSummaryUsesRequestedLocaleAndPluralForms() {
+        XCTAssertEqual(
+            messageCenterHeaderSummary(3, 2, locale: Locale(identifier: "fr-FR")),
+            "3 messages · 2 non lus"
+        )
+        XCTAssertEqual(
+            messageCenterHeaderSummary(1, 1, locale: Locale(identifier: "en-US")),
+            "1 message · 1 unread"
+        )
+    }
+
     func testIdentityTransitionInvalidatesAnAlreadyRequestedDetail() {
         XCTAssertTrue(shouldInvalidateMessageCenterDetail(
             entryId: entryId,
@@ -67,6 +78,11 @@ final class MessageCenterPresentationLifecycleTests: XCTestCase {
         XCTAssertFalse(isMessageCenterContentVisible(visibleArea: 49, totalArea: 100))
         XCTAssertTrue(isMessageCenterContentVisible(visibleArea: 50, totalArea: 100))
         XCTAssertTrue(isMessageCenterContentVisible(visibleArea: 100, totalArea: 100))
+    }
+
+    func testPublishedDivKitRenderingOwnsItsVisualChrome() {
+        XCTAssertFalse(shouldApplyMessageCenterNativeChrome(hasPublishedRendering: true))
+        XCTAssertTrue(shouldApplyMessageCenterNativeChrome(hasPublishedRendering: false))
     }
 
     private func state(

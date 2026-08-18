@@ -299,6 +299,36 @@ final class EngageMessageCenterTests: XCTestCase {
         XCTAssertTrue(store.pending(generation: 4).isEmpty)
     }
 
+    func testCachedWindowsAreIsolatedBySortOrder() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InboxStore(directory: directory)
+        XCTAssertTrue(store.activate(4))
+        XCTAssertTrue(store.savePage(
+            generation: 4,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "newest")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1,
+            sortOrder: .newestFirst
+        ))
+        XCTAssertTrue(store.savePage(
+            generation: 4,
+            pageSize: 20,
+            cursor: nil,
+            entries: [makeEntry(id: "oldest")],
+            nextCursor: nil,
+            hasMore: false,
+            unreadCount: 1,
+            sortOrder: .oldestFirst
+        ))
+
+        XCTAssertEqual(store.cachedWindow(pageSize: 20, sortOrder: .newestFirst).entryIds, ["newest"])
+        XCTAssertEqual(store.cachedWindow(pageSize: 20, sortOrder: .oldestFirst).entryIds, ["oldest"])
+    }
+
     private func makeEntry(id: String, readAt: Date? = nil) -> InboxEntry {
         InboxEntry(
             id: InboxEntryId(id),

@@ -244,6 +244,7 @@ Applications that own their navigation can embed the reusable views directly:
 
 ```swift
 EngageMessageCenterListView(
+    sortOrder: .newestFirst,
     onEntryTap: { entry in router.openMessage(entry.id) }
 )
 
@@ -255,10 +256,17 @@ EngageMessageCenterDetailView(
 
 These views contain no navigation controller or toolbar and share the same Inbox store, rendering
 cache, DivKit runtime, and action registry as the ready-made presentation.
+The list header presents the synchronized message and unread counts above a compact All/Unread
+segmented filter; bulk read mutations remain available through the headless Inbox API.
+The list provides the standard trailing swipe actions itself: delete, mark read, and mark unread.
+A full swipe never executes the destructive action directly. Selecting delete opens the native SwiftUI
+confirmation alert with cancel and destructive actions; only confirmation enqueues the Inbox mutation.
 
-For a custom UI, consume `Engage.messageCenter.inbox.unreadCount`, create an `InboxPager`, and call
-the inbox mutation methods directly. Rendering documents remain separate from inbox metadata so a
-custom list does not need to understand the DivKit payload until a message is opened.
+For a custom UI, consume `Engage.messageCenter.inbox.unreadCount`, create a pager with
+`Engage.messageCenter.inbox.pager(pageSize: 20, sortOrder: .newestFirst)`, and call the inbox
+mutation methods directly. Sorting is server-side on `sentAt`; each order owns a separate cursor
+window. Rendering documents remain separate from inbox metadata so a custom list does not need to
+understand the DivKit payload until a message is opened.
 
 ## Modular integration
 

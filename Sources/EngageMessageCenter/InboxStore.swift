@@ -132,7 +132,8 @@ final class InboxStore: @unchecked Sendable {
         entries: [InboxEntry],
         nextCursor: String?,
         hasMore: Bool,
-        unreadCount: Int
+        unreadCount: Int,
+        sortOrder: InboxSortOrder = .newestFirst
     ) -> Bool {
         EngageLogger.debug(
             "MessageCenter.Store",
@@ -152,7 +153,7 @@ final class InboxStore: @unchecked Sendable {
             }
             stored.unreadCount = projectedUnreadCount(server: unreadCount, pending: stored.mutations)
 
-            let key = String(pageSize)
+            let key = windowKey(pageSize: pageSize, sortOrder: sortOrder)
             let incoming = entries.map { $0.id.value }
             if cursor == nil {
                 stored.windows[key] = StoredInboxWindow(
@@ -174,10 +175,10 @@ final class InboxStore: @unchecked Sendable {
         }
     }
 
-    func cachedWindow(pageSize: Int) -> CachedInboxWindow {
+    func cachedWindow(pageSize: Int, sortOrder: InboxSortOrder = .newestFirst) -> CachedInboxWindow {
         mutate { purgeExpiredLocked(now: Date()) }
         let cached = locked {
-            let window = stored.windows[String(pageSize)]
+            let window = stored.windows[windowKey(pageSize: pageSize, sortOrder: sortOrder)]
             return CachedInboxWindow(
                 entryIds: window?.entryIds.filter { stored.entries[$0] != nil } ?? [],
                 nextCursor: window?.nextCursor,
@@ -189,6 +190,10 @@ final class InboxStore: @unchecked Sendable {
             "cached window read pageSize=\(pageSize) entries=\(cached.entryIds.count) hasMore=\(cached.hasMore)"
         )
         return cached
+    }
+
+    private func windowKey(pageSize: Int, sortOrder: InboxSortOrder) -> String {
+        "\(pageSize):\(sortOrder.rawValue)"
     }
 
     @discardableResult
