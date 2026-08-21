@@ -5,6 +5,52 @@ public struct PreferenceCenterSnapshot: Equatable, Sendable {
     public let displayName: String
     public let description: String?
     public let sections: [PreferenceSection]
+    public let projectStyle: PreferenceCenterProjectStyle?
+
+    public init(
+        key: String,
+        displayName: String,
+        description: String?,
+        sections: [PreferenceSection],
+        projectStyle: PreferenceCenterProjectStyle? = nil
+    ) {
+        self.key = key
+        self.displayName = displayName
+        self.description = description
+        self.sections = sections
+        self.projectStyle = projectStyle
+    }
+}
+
+public enum PreferenceCenterStylePolicy: String, Equatable, Sendable {
+    case system = "SYSTEM"
+    case fixed = "FIXED"
+}
+
+public struct PreferenceCenterColorScheme: Equatable, Sendable {
+    public let primary: String?
+    public let onPrimary: String?
+    public let primaryContainer: String?
+    public let onPrimaryContainer: String?
+    public let surface: String?
+    public let surfaceContainerLow: String?
+    public let surfaceContainer: String?
+    public let onSurface: String?
+    public let onSurfaceVariant: String?
+    public let outlineVariant: String?
+    public let error: String?
+    public let onError: String?
+}
+
+/// Immutable project theme compiled when the Preference Center is published.
+public struct PreferenceCenterProjectStyle: Equatable, Sendable {
+    public let policy: PreferenceCenterStylePolicy
+    public let fallbackModeKey: String
+    public let fixedModeKey: String?
+    public let lightModeKey: String?
+    public let darkModeKey: String?
+    public let modes: [String: PreferenceCenterColorScheme]
+    public let designTokenVersion: Int
 }
 
 extension PreferenceCenterSnapshot {
@@ -181,8 +227,45 @@ public final class PreferenceCenter: @unchecked Sendable {
             key: key,
             displayName: localized(definition["displayName"]) ?? key,
             description: localized(definition["description"]),
-            sections: sections
+            sections: sections,
+            projectStyle: projectStyle(definition.object("resolvedStyle"))
         ).alsoLogged
+    }
+
+    private func projectStyle(_ value: [String: JSONValue]?) -> PreferenceCenterProjectStyle? {
+        guard let value,
+              let rawPolicy = value.string("appearancePolicy"),
+              let policy = PreferenceCenterStylePolicy(rawValue: rawPolicy),
+              let fallbackModeKey = value.string("fallbackModeKey"),
+              let rawModes = value.object("modes") else { return nil }
+        let systemModes = value.object("systemModeKeys")
+        let modes = rawModes.reduce(into: [String: PreferenceCenterColorScheme]()) { result, item in
+            guard let palette = item.value.objectValue else { return }
+            result[item.key] = PreferenceCenterColorScheme(
+                primary: palette.string("PRIMARY"),
+                onPrimary: palette.string("ON_PRIMARY"),
+                primaryContainer: palette.string("PRIMARY_CONTAINER"),
+                onPrimaryContainer: palette.string("ON_PRIMARY_CONTAINER"),
+                surface: palette.string("SURFACE"),
+                surfaceContainerLow: palette.string("SURFACE_CONTAINER_LOW"),
+                surfaceContainer: palette.string("SURFACE_CONTAINER"),
+                onSurface: palette.string("ON_SURFACE"),
+                onSurfaceVariant: palette.string("ON_SURFACE_VARIANT"),
+                outlineVariant: palette.string("OUTLINE_VARIANT"),
+                error: palette.string("ERROR"),
+                onError: palette.string("ON_ERROR")
+            )
+        }
+        guard !modes.isEmpty else { return nil }
+        return PreferenceCenterProjectStyle(
+            policy: policy,
+            fallbackModeKey: fallbackModeKey,
+            fixedModeKey: value.string("fixedModeKey"),
+            lightModeKey: systemModes?.string("LIGHT"),
+            darkModeKey: systemModes?.string("DARK"),
+            modes: modes,
+            designTokenVersion: Int(value.integer("designTokenVersion") ?? 0)
+        )
     }
 }
 

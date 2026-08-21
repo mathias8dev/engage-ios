@@ -55,7 +55,7 @@ public extension PreferenceCenter {
     /// The headless `center(_:)` state remains the source of truth.
     @MainActor
     func makeViewController(_ key: String? = nil) -> UIViewController {
-        makeViewController(key, materialTheme: .system)
+        PreferenceCenterViewController(snapshot: center(key), materialTheme: nil)
     }
 
     /// Builds Engage's ready-to-use UI with a custom material theme.
@@ -74,7 +74,7 @@ public extension PreferenceCenter {
         _ key: String? = nil,
         from presenter: UIViewController? = nil
     ) {
-        display(key, from: presenter, materialTheme: .system)
+        present(makeViewController(key), from: presenter, initialTheme: .system)
     }
 
     /// Presents the ready-to-use preference center with a custom material theme.
@@ -84,7 +84,15 @@ public extension PreferenceCenter {
         from presenter: UIViewController? = nil,
         materialTheme: PreferenceCenterMaterialTheme
     ) {
-        let content = makeViewController(key, materialTheme: materialTheme)
+        present(makeViewController(key, materialTheme: materialTheme), from: presenter, initialTheme: materialTheme)
+    }
+
+    @MainActor
+    private func present(
+        _ content: UIViewController,
+        from presenter: UIViewController?,
+        initialTheme materialTheme: PreferenceCenterMaterialTheme
+    ) {
         let navigation = UINavigationController(rootViewController: content)
         let navigationAppearance = UINavigationBarAppearance()
         navigationAppearance.configureWithOpaqueBackground()
@@ -114,14 +122,16 @@ private final class PreferenceCenterViewController: UITableViewController {
     }
 
     private let snapshot: EngageState<PreferenceCenterSnapshot?>
-    private let materialTheme: PreferenceCenterMaterialTheme
+    private let explicitMaterialTheme: PreferenceCenterMaterialTheme?
+    private var materialTheme: PreferenceCenterMaterialTheme
     private var current: PreferenceCenterSnapshot?
     private var rows: [[Row]] = []
     private var observation: Task<Void, Never>?
 
-    init(snapshot: EngageState<PreferenceCenterSnapshot?>, materialTheme: PreferenceCenterMaterialTheme) {
+    init(snapshot: EngageState<PreferenceCenterSnapshot?>, materialTheme: PreferenceCenterMaterialTheme?) {
         self.snapshot = snapshot
-        self.materialTheme = materialTheme
+        self.explicitMaterialTheme = materialTheme
+        self.materialTheme = materialTheme ?? .system
         super.init(style: .insetGrouped)
     }
 
@@ -149,6 +159,13 @@ private final class PreferenceCenterViewController: UITableViewController {
     }
 
     deinit { observation?.cancel() }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard explicitMaterialTheme == nil,
+              previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else { return }
+        apply(current)
+    }
 
     override func numberOfSections(in tableView: UITableView) -> Int { rows.count }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
@@ -187,6 +204,10 @@ private final class PreferenceCenterViewController: UITableViewController {
 
     private func apply(_ value: PreferenceCenterSnapshot?) {
         current = value
+        if explicitMaterialTheme == nil {
+            materialTheme = value?.projectStyle?.materialTheme(for: traitCollection) ?? .system
+            applyTheme()
+        }
         title = value?.displayName ?? preferenceCenterLocalized("preference_center.title")
         rows = value?.sections.map { section in
             section.subscriptions.flatMap { preference -> [Row] in
@@ -219,6 +240,19 @@ private final class PreferenceCenterViewController: UITableViewController {
             ? nil
             : unavailableView()
         tableView.reloadData()
+    }
+
+    private func applyTheme() {
+        tableView.backgroundColor = materialTheme.surface
+        view.backgroundColor = materialTheme.surface
+        let appearance = UINavigationBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = materialTheme.surface
+        appearance.titleTextAttributes = [.foregroundColor: materialTheme.onSurface]
+        navigationController?.navigationBar.standardAppearance = appearance
+        navigationController?.navigationBar.scrollEdgeAppearance = appearance
+        navigationController?.navigationBar.compactAppearance = appearance
+        navigationController?.navigationBar.tintColor = materialTheme.primary
     }
 
     private func unavailableView() -> UIView {
@@ -306,6 +340,59 @@ private final class PreferenceCenterViewController: UITableViewController {
 
 private func preferenceCenterLocalized(_ key: String) -> String {
     NSLocalizedString(key, bundle: .module, comment: "")
+}
+
+@MainActor
+private extension PreferenceCenterProjectStyle {
+    func materialTheme(for traits: UITraitCollection) -> PreferenceCenterMaterialTheme? {
+        let isDark = traits.userInterfaceStyle == .dark
+        let requested = switch policy {
+        case .fixed: fixedModeKey
+        case .system: isDark ? darkModeKey : lightModeKey
+        }
+        let modeKey = requested.flatMap { modes[$0] == nil ? nil : $0 }
+            ?? (modes[fallbackModeKey] == nil ? nil : fallbackModeKey)
+            ?? modes.keys.sorted().first
+        guard let modeKey, let colors = modes[modeKey] else { return nil }
+        let fallback = PreferenceCenterMaterialTheme.system
+        return PreferenceCenterMaterialTheme(
+            primary: UIColor(engageHex: colors.primary) ?? fallback.primary,
+            onPrimary: UIColor(engageHex: colors.onPrimary) ?? fallback.onPrimary,
+            primaryContainer: UIColor(engageHex: colors.primaryContainer) ?? fallback.primaryContainer,
+            onPrimaryContainer: UIColor(engageHex: colors.onPrimaryContainer) ?? fallback.onPrimaryContainer,
+            surface: UIColor(engageHex: colors.surface) ?? fallback.surface,
+            surfaceContainerLow: UIColor(engageHex: colors.surfaceContainerLow) ?? fallback.surfaceContainerLow,
+            onSurface: UIColor(engageHex: colors.onSurface) ?? fallback.onSurface,
+            onSurfaceVariant: UIColor(engageHex: colors.onSurfaceVariant) ?? fallback.onSurfaceVariant,
+            outlineVariant: UIColor(engageHex: colors.outlineVariant) ?? fallback.outlineVariant
+        )
+    }
+}
+
+private extension UIColor {
+    convenience init?(engageHex rawValue: String?) {
+        guard var value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              value.first == "#" else { return nil }
+        value.removeFirst()
+        guard value.count == 6 || value.count == 8,
+              let raw = UInt64(value, radix: 16) else { return nil }
+        let red: CGFloat
+        let green: CGFloat
+        let blue: CGFloat
+        let alpha: CGFloat
+        if value.count == 8 {
+            alpha = CGFloat((raw >> 24) & 0xff) / 255
+            red = CGFloat((raw >> 16) & 0xff) / 255
+            green = CGFloat((raw >> 8) & 0xff) / 255
+            blue = CGFloat(raw & 0xff) / 255
+        } else {
+            alpha = 1
+            red = CGFloat((raw >> 16) & 0xff) / 255
+            green = CGFloat((raw >> 8) & 0xff) / 255
+            blue = CGFloat(raw & 0xff) / 255
+        }
+        self.init(red: red, green: green, blue: blue, alpha: alpha)
+    }
 }
 
 private extension Channel {
