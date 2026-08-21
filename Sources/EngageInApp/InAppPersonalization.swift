@@ -36,7 +36,7 @@ enum InAppPersonalization {
             "locale": .string(locale),
             "session_count": .integer(Int64(sessionCount)),
         ]
-        if let screenName { runtime["screen_name"] = .string(screenName) }
+        if let screenName { runtime["screen_key"] = .string(screenName) }
         result["runtime"] = .object(merge(result["runtime"]?.objectValue, runtime))
         return result
     }

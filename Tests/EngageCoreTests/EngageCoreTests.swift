@@ -410,6 +410,31 @@ final class EngageCoreTests: XCTestCase {
         XCTAssertFalse(executed)
     }
 
+    func testScreenOperationsUseCanonicalSnakeCasePayloads() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let runtime = CoreRuntime(
+            config: EngageConfig(appKey: "eng_app_tests", endpoint: URL(string: "https://example.test/v1/")!),
+            directory: directory,
+            secureStorageBackend: .fileSystem
+        )
+        let events = Events(runtime: runtime)
+
+        try await events.trackScreen("home")
+        try await events.trackScreen("checkout")
+        try await events.clearScreen()
+
+        let operations = await testPersistence(at: directory).operations()
+        XCTAssertEqual(operations.map(\.type), ["SCREEN_VIEWED", "SCREEN_VIEWED", "SCREEN_CLEARED"])
+        XCTAssertEqual(operations[0].payload["screen_key"], .string("home"))
+        XCTAssertNil(operations[0].payload["screenKey"])
+        XCTAssertEqual(operations[1].payload["screen_key"], .string("checkout"))
+        XCTAssertEqual(operations[1].payload["previous_screen_key"], .string("home"))
+        XCTAssertEqual(operations[2].payload["screen_key"], .string("checkout"))
+        XCTAssertNotNil(operations[2].payload["visible_duration_millis"])
+        XCTAssertNil(operations[2].payload["visibleDurationMillis"])
+    }
+
     func testEditingCoreFeaturesDoesNotDisableAModuleInstalledLater() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
