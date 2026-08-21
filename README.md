@@ -222,6 +222,29 @@ EngageInAppPlacement("home.hero")
 The SDK downloads versioned remote documents over HTTPS, stores them locally, evaluates triggers on
 device, and renders eligible DivKit documents. It does not require SSE or a WebSocket connection.
 
+### Automation outcomes
+
+When an In-App Experience belongs to an Automation, `content.automation` contains the immutable run
+context and its declared `outcomeKeys`. DivKit can emit an outcome with an Engage URL:
+
+```text
+engage://outcome/survey_submitted?properties=%7B%22score%22%3A9%7D
+```
+
+A custom application renderer can use the same durable path:
+
+```swift
+let accepted = await Engage.inApp.recordOutcome(
+    content,
+    key: "survey_submitted",
+    properties: ["score": .integer(9)]
+)
+```
+
+The SDK rejects unknown outcome keys and queues accepted interactions durably. The backend validates
+the properties against the published outcome contract and performs the graph transition
+idempotently.
+
 ## Present the Message Center
 
 The complete product exports a ready-to-use SwiftUI inbox:

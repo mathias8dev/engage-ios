@@ -36,6 +36,16 @@ public struct InAppContent: Sendable {
     public let type: InAppContentType
     public let payload: EngagePayload
     public let presentation: PresentationSpec
+    public let automation: InAppAutomationContext?
+}
+
+public struct InAppAutomationContext: Sendable {
+    public let automationId: String
+    public let automationVersion: Int
+    public let runId: String
+    public let nodeId: String
+    public let experienceVersion: Int
+    public let outcomeKeys: Set<String>
 }
 
 public enum DisplayDecision: Sendable { case allow, deferDisplay, discard }
@@ -147,6 +157,29 @@ public final class InApp: @unchecked Sendable {
         EngageLogger.info("InApp", "conversion reported messageId=\(content.messageId) variant=\(content.variantId ?? "none")")
         Task { [weak runtime] in await runtime?.record(content, interaction: .conversion) }
     }
+    @discardableResult
+    public func recordOutcome(
+        _ content: InAppContent,
+        key: String,
+        properties: EngagePayload = [:]
+    ) async -> Bool {
+        await recordOutcome(messageId: content.messageId, key: key, properties: properties)
+    }
+    @discardableResult
+    public func recordOutcome(
+        messageId: String,
+        key: String,
+        properties: EngagePayload = [:]
+    ) async -> Bool {
+        guard key.range(of: "^[a-z][a-z0-9_.-]{0,127}$", options: .regularExpression) != nil else {
+            EngageLogger.warning(
+                "InApp",
+                "outcome ignored messageId=\(messageId) key=\(key) reason=invalid_key"
+            )
+            return false
+        }
+        return await runtime.recordOutcome(messageId: messageId, key: key, properties: properties)
+    }
     public func recordRenderFailure(_ content: InAppContent) {
         EngageLogger.warning("InApp", "render failed messageId=\(content.messageId) variant=\(content.variantId ?? "none")")
         Task { [weak runtime] in await runtime?.renderFailed(content) }
@@ -170,7 +203,13 @@ public final class InApp: @unchecked Sendable {
     }
 }
 
-private enum InAppInteraction: String { case impression = "IMPRESSION", click = "CLICK", dismiss = "DISMISS", conversion = "CONVERSION" }
+private enum InAppInteraction: String {
+    case impression = "IMPRESSION"
+    case click = "CLICK"
+    case dismiss = "DISMISS"
+    case conversion = "CONVERSION"
+    case outcome = "OUTCOME"
+}
 
 private actor InAppRuntime {
     private let context: EngageModuleContext
@@ -273,7 +312,7 @@ private actor InAppRuntime {
         switch interaction {
         case .impression: evaluator.recordImpression(candidate)
         case .dismiss: evaluator.recordDismiss(candidate)
-        case .click, .conversion: break
+        case .click, .conversion, .outcome: break
         }
         let queued = await context.enqueue(type: "INTERACTION_TRACKED", payload: [
             "experienceId": .string(candidate.campaign.experienceId),
@@ -287,6 +326,43 @@ private actor InAppRuntime {
                 "messageId=\(candidate.campaign.messageId) type=\(interaction.rawValue) queued=\(queued)"
         )
         if interaction == .impression || interaction == .dismiss { await evaluate() }
+    }
+
+    func recordOutcome(messageId: String, key: String, properties: EngagePayload) async -> Bool {
+        guard enabled, let candidate = resolutions.values.first(where: { $0.campaign.messageId == messageId }) else {
+            EngageLogger.warning(
+                "InApp.Runtime",
+                "outcome ignored messageId=\(messageId) key=\(key) reason=unknown_or_disabled"
+            )
+            return false
+        }
+        guard let automation = candidate.campaign.automation else {
+            EngageLogger.warning(
+                "InApp.Runtime",
+                "outcome ignored messageId=\(messageId) key=\(key) reason=not_automation"
+            )
+            return false
+        }
+        guard automation.outcomeKeys.contains(key) else {
+            EngageLogger.warning(
+                "InApp.Runtime",
+                "outcome ignored messageId=\(messageId) key=\(key) reason=undeclared"
+            )
+            return false
+        }
+        let queued = await context.enqueue(type: "INTERACTION_TRACKED", payload: [
+            "experienceId": .string(candidate.campaign.experienceId),
+            "messageId": .string(candidate.campaign.messageId),
+            "variantId": (candidate.variant.id ?? candidate.variant.key).map(JSONValue.string) ?? .null,
+            "type": .string(InAppInteraction.outcome.rawValue),
+            "outcomeKey": .string(key),
+            "properties": .object(properties),
+        ])
+        EngageLogger.info(
+            "InApp.Runtime",
+            "outcome queued messageId=\(messageId) key=\(key) queued=\(queued)"
+        )
+        return queued
     }
 
     func renderFailed(_ content: InAppContent) async {

@@ -51,6 +51,7 @@ struct InAppCampaign: Sendable {
     let variants: [InAppContentVariant]
     let personalization: InAppPersonalizationContext
     let oneShot: Bool
+    let automation: InAppAutomationContext? = nil
 }
 
 struct ResolvedInAppContent: Sendable {
@@ -70,7 +71,8 @@ struct ResolvedInAppContent: Sendable {
             variantId: variant.id ?? variant.key,
             type: variant.type,
             payload: payload,
-            presentation: variant.presentation
+            presentation: variant.presentation,
+            automation: campaign.automation
         )
     }
 }
