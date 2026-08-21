@@ -3,6 +3,8 @@ import EngageCore
 @_spi(Modules) import EngageCore
 
 enum InAppDocumentParser {
+    private static let outcomeKeyPattern = #"^[a-z][a-z0-9_.-]{0,127}$"#
+
     static func parse(_ document: RemoteDocument) -> InAppCampaign? {
         do {
             let campaign = document.payload.string("source") == "AUTOMATION"
@@ -54,7 +56,8 @@ enum InAppDocumentParser {
             fallbackLocale: definition.string("fallbackLocale"),
             variants: variants,
             personalization: parsePersonalization(payload),
-            oneShot: false
+            oneShot: false,
+            automation: nil
         )
     }
 
@@ -95,7 +98,23 @@ enum InAppDocumentParser {
             fallbackLocale: nil,
             variants: [variant],
             personalization: parsePersonalization(payload),
-            oneShot: true
+            oneShot: true,
+            automation: InAppAutomationContext(
+                automationId: try payload.requiredString("automationId"),
+                automationVersion: try payload.requiredInt("automationVersion"),
+                runId: try payload.requiredString("automationRunId"),
+                nodeId: try payload.requiredString("automationNodeId"),
+                experienceVersion: try payload.requiredInt("experienceVersion"),
+                outcomeKeys: Set(try payload.requiredArray("outcomeKeys").map { value in
+                    guard
+                        let key = value.stringValue,
+                        key.range(of: outcomeKeyPattern, options: .regularExpression) != nil
+                    else {
+                        throw ParseError.invalid("outcomeKeys")
+                    }
+                    return key
+                })
+            )
         )
     }
 
@@ -189,6 +208,10 @@ private extension Dictionary where Key == String, Value == JSONValue {
     func requiredArray(_ key: String) throws -> [JSONValue] {
         guard let value = array(key) else { throw ParseError.missing(key) }
         return value
+    }
+    func requiredInt(_ key: String) throws -> Int {
+        guard let value = number(key), value.rounded() == value else { throw ParseError.missing(key) }
+        return Int(value)
     }
     func date(_ key: String) -> Date? { string(key).flatMap(parseInAppDate) }
 

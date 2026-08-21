@@ -141,7 +141,13 @@ final class InAppEvaluatorTests: XCTestCase {
             payload: [
                 "source": .string("AUTOMATION"),
                 "experienceId": .string("automation-experience"),
+                "experienceVersion": .integer(5),
                 "messageId": .string("message-12"),
+                "automationId": .string("automation-1"),
+                "automationVersion": .integer(3),
+                "automationRunId": .string("run-1"),
+                "automationNodeId": .string("node-1"),
+                "outcomeKeys": .array([.string("accepted"), .string("declined")]),
                 "availableAt": .string("2026-08-02T12:00:00Z"),
                 "expiresAt": .string("2026-08-03T12:00:00Z"),
                 "personalization": .object([
@@ -170,6 +176,12 @@ final class InAppEvaluatorTests: XCTestCase {
 
         XCTAssertTrue(campaign.oneShot)
         XCTAssertEqual(campaign.messageId, "message-12")
+        XCTAssertEqual(campaign.automation?.automationId, "automation-1")
+        XCTAssertEqual(campaign.automation?.automationVersion, 3)
+        XCTAssertEqual(campaign.automation?.runId, "run-1")
+        XCTAssertEqual(campaign.automation?.nodeId, "node-1")
+        XCTAssertEqual(campaign.automation?.experienceVersion, 5)
+        XCTAssertEqual(campaign.automation?.outcomeKeys, Set(["accepted", "declined"]))
         XCTAssertEqual(campaign.variants.first?.allocationPercentage, 100)
         XCTAssertEqual(
             campaign.personalization.values["profile"],
@@ -179,6 +191,35 @@ final class InAppEvaluatorTests: XCTestCase {
             campaign.personalization.fallbacks["profile"],
             .object(["first_name": .string("friend")])
         )
+    }
+
+    func testAutomationDocumentRejectsInvalidOutcomeKeysWithoutCrashingTheHostApp() {
+        let document = RemoteDocument(
+            module: .inApp,
+            key: "automation-invalid-outcome",
+            revision: 1,
+            payload: [
+                "source": .string("AUTOMATION"),
+                "experienceId": .string("automation-experience"),
+                "experienceVersion": .integer(1),
+                "messageId": .string("message-1"),
+                "automationId": .string("automation-1"),
+                "automationVersion": .integer(1),
+                "automationRunId": .string("run-1"),
+                "automationNodeId": .string("node-1"),
+                "outcomeKeys": .array([.string("accepted"), .string("Invalid Key")]),
+                "content": .object([
+                    "type": .string("SCENE"),
+                    "payload": .object(["card": .object([:])]),
+                ]),
+                "presentation": .object([
+                    "mode": .string("EMBEDDED"),
+                    "embedded": .object(["placementKey": .string("home.hero")]),
+                ]),
+            ]
+        )
+
+        XCTAssertNil(InAppDocumentParser.parse(document))
     }
 
     func testEventOrScreenPreservesEventEligibilityAcrossScreenChanges() throws {
@@ -222,7 +263,13 @@ final class InAppEvaluatorTests: XCTestCase {
                 payload: [
                     "source": .string("AUTOMATION"),
                     "experienceId": .string("automation-experience"),
+                    "experienceVersion": .integer(5),
                     "messageId": .string("message-12"),
+                    "automationId": .string("automation-1"),
+                    "automationVersion": .integer(3),
+                    "automationRunId": .string("run-1"),
+                    "automationNodeId": .string("node-1"),
+                    "outcomeKeys": .array([.string("accepted")]),
                     "content": .object([
                         "type": .string(contentType),
                         "payload": .object(["card": .object([:])]),

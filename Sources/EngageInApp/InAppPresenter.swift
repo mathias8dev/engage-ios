@@ -471,6 +471,11 @@ public final class EngageInAppContentView: UIView {
             if let onDismissRequested { onDismissRequested() } else { owner.recordDismiss(content) }
         case "conversion":
             owner.recordConversion(content)
+        case "outcome":
+            guard let encoded = url.pathComponents.dropFirst().first,
+                  let key = encoded.removingPercentEncoding, !key.isEmpty else { return }
+            let properties = payloadQueryItem("properties", in: url)
+            Task { await owner.recordOutcome(content, key: key, properties: properties) }
         case "action":
             guard let encoded = url.pathComponents.dropFirst().first,
                   let name = encoded.removingPercentEncoding, !name.isEmpty else { return }
@@ -482,8 +487,12 @@ public final class EngageInAppContentView: UIView {
     }
 
     private func actionArguments(_ url: URL) -> EngagePayload {
+        payloadQueryItem("arguments", in: url)
+    }
+
+    private func payloadQueryItem(_ name: String, in url: URL) -> EngagePayload {
         guard let raw = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .queryItems?.first(where: { $0.name == "arguments" })?.value,
+            .queryItems?.first(where: { $0.name == name })?.value,
               let data = raw.data(using: .utf8),
               let value = try? JSONDecoder().decode(JSONValue.self, from: data),
               let object = value.objectValue else { return [:] }

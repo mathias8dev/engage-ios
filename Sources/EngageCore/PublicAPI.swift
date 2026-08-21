@@ -420,10 +420,10 @@ public final class Events: @unchecked Sendable {
         EngageLogger.info("Core.Events", "screen changed previous=\(previous ?? "none") current=\(key)")
         if features.contains(.inApp) { runtime.signals.emit(.screenViewed(key)) }
         guard features.contains(.analytics) else { return }
-        var payload: EngagePayload = ["screenKey": .string(key)]
-        if let previous { payload["previousScreenKey"] = .string(previous) }
+        var payload: EngagePayload = ["screen_key": .string(key)]
+        if let previous { payload["previous_screen_key"] = .string(previous) }
         if let duration {
-            payload["previousVisibleDurationMillis"] = .integer(Int64(floor(duration * 1000)))
+            payload["previous_visible_duration_millis"] = .integer(Int64(floor(duration * 1000)))
         }
         try await runtime.enqueue(type: "SCREEN_VIEWED", payload: payload)
     }
@@ -455,8 +455,8 @@ public final class Events: @unchecked Sendable {
         if features.contains(.inApp) { runtime.signals.emit(.screenCleared) }
         if features.contains(.analytics) {
             try await runtime.enqueue(type: "SCREEN_CLEARED", payload: [
-                "screenKey": .string(screen),
-                "visibleDurationMillis": .integer(Int64(floor(duration * 1000))),
+                "screen_key": .string(screen),
+                "visible_duration_millis": .integer(Int64(floor(duration * 1000))),
             ])
         }
     }
